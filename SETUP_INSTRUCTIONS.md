@@ -52,8 +52,8 @@ YE_CODE_DIR=/home/ye/feedlyai-work
 
 - [ ] 작업 디렉토리에서 `.env` 파일 생성 (`.env.example` 참고)
 - [ ] `PART_NAME`, `PORT`, `DB_PORT` 등 설정
-- [ ] Docker Compose 실행 (`docker compose up -d --build`)
-- [ ] 로그 확인 (`docker compose logs -f app`)
+- [ ] Docker Compose 실행 (`docker-compose up -d --build`)
+- [ ] 로그 확인 (`docker-compose logs -f app`)
 - [ ] Health check (`curl http://localhost:${PORT}/healthz`)
 
 자세한 내용은 `README_DOCKER.md` 참고
