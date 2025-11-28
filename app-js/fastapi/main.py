@@ -1,6 +1,7 @@
 import os
 import json
 import uuid
+import asyncio
 from fastapi import UploadFile, File
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -9,18 +10,14 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Any
 
-from sqlalchemy import (
-    Column,
-    Integer,
-    String,
-    Text,
-    DateTime,
-    ForeignKey,
-    create_engine,
-)
-from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Session
+# --- Use Async SQLAlchemy components ---
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker, declarative_base, relationship
+from sqlalchemy.future import select
 
 from openai import OpenAI
 
@@ -30,84 +27,72 @@ from openai import OpenAI
 
 load_dotenv()
 
-POSTGRES_USER = os.getenv("POSTGRES_USER", "feedly_user")
-POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "feedly_password")
-POSTGRES_DB = os.getenv("POSTGRES_DB", "feedly_db")
-POSTGRES_HOST = os.getenv("POSTGRES_HOST", "postgres-js")  # docker service name
-POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5436")         # your custom port
+POSTGRES_USER = os.getenv("POSTGRES_USER", "feedlyai")
+POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "feedlyai_dev_password_74154")
+POSTGRES_DB = os.getenv("POSTGRES_DB", "feedlyai")
+POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
+POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")
 
-DATABASE_URL = (
-    f"postgresql+psycopg2://{POSTGRES_USER}:{POSTGRES_PASSWORD}"
-    f"@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
-)
+# --- Use the asyncpg driver ---
+DATABASE_URL = f"postgresql+asyncpg://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY not set")
-
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-MEDIA_ROOT = os.getenv("MEDIA_ROOT", "/app/media/uploads")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DEFAULT_MEDIA_ROOT = os.path.join(PROJECT_ROOT, "media", "uploads")
+MEDIA_ROOT = os.getenv("MEDIA_ROOT", DEFAULT_MEDIA_ROOT)
 os.makedirs(MEDIA_ROOT, exist_ok=True)
 
 # ============================
-# 💾 SQLAlchemy Setup
+# 💾 SQLAlchemy Async Setup
 # ============================
 
 Base = declarative_base()
-engine = create_engine(DATABASE_URL, echo=False, future=True)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+engine = create_async_engine(DATABASE_URL, echo=False)
+AsyncSessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 
-
+# --- Models (Unchanged) ---
 class UserDescription(Base):
     __tablename__ = "user_descriptions"
-
     id = Column(Integer, primary_key=True, index=True)
     description_kr = Column(Text, nullable=False)
     description_en = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
-
-    ad_copies = relationship("AdCopy", back_populates="description")
+    generations = relationship("AdCopyGeneration", back_populates="description")
 
 class UploadedImage(Base):
     __tablename__ = "uploaded_images"
-
     id = Column(Integer, primary_key=True, index=True)
     file_path = Column(String(512), nullable=False)
     original_filename = Column(String(255), nullable=False)
     content_type = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    generations = relationship("AdCopyGeneration", back_populates="image")
 
-    ad_copies = relationship("AdCopy", back_populates="image")
-
-class AdCopy(Base):
-    __tablename__ = "ad_copies"
-
+class AdCopyGeneration(Base):
+    __tablename__ = "ad_copy_generations"
     id = Column(Integer, primary_key=True, index=True)
     description_id = Column(Integer, ForeignKey("user_descriptions.id"), nullable=False)
     strategy_id = Column(Integer, nullable=False)
     strategy_name = Column(String(100), nullable=False)
-    product_name = Column(Text, nullable=False)
-    copy_ko = Column(Text, nullable=False)
     image_id = Column(Integer, ForeignKey("uploaded_images.id"), nullable=True)
+    variants = Column(JSONB, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+    description = relationship("UserDescription", back_populates="generations")
+    image = relationship("UploadedImage", back_populates="generations")
 
-    description = relationship("UserDescription", back_populates="ad_copies")
-    image = relationship("UploadedImage", back_populates="ad_copies")
-
-def init_db():
-    """데이터베이스 테이블을 생성합니다."""
-    try:
-        Base.metadata.create_all(bind=engine)
-        print("✅ Database tables created successfully.")
-    except Exception as e:
-        print(f"❌ Error creating database tables: {e}")
+async def init_db():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    print("✅ Database tables created successfully.")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """FastAPI 앱의 시작과 종료 이벤트를 관리합니다."""
     print("🚀 Application startup...")
-    init_db()
+    await init_db()
     yield
     print("👋 Application shutdown.")
 
@@ -178,55 +163,49 @@ Rules:
 
 
 # ============================
-# 🧾 Pydantic Schemas
+# --- Pydantic Models ---
 # ============================
 
 class UploadImageResponse(BaseModel):
     id: int
     original_filename: str
 
-    
 class TranslateRequest(BaseModel):
     description_kr: str
-
 
 class TranslateResponse(BaseModel):
     id: int
     description_kr: str
     description_en: str
 
-
 class GenerateCopyRequest(BaseModel):
     description_id: int
     strategy_id: int
     strategy_name: str
-    product_name: str
+    image_id: Optional[int] = None
     foreground_analysis: Optional[str] = ""
 
-
-class AdCopyVariant(BaseModel):
-    id: int
-    copy_ko: str
-
-
+# --- FIX: Consolidated Response Models ---
 class GenerateCopyResponse(BaseModel):
-    description_id: int
-    strategy_id: int
+    generation_id: int
+    variants: List[Any]
+
+class GenerationResult(BaseModel):
+    id: int
     strategy_name: str
-    product_name: str
-    variants: List[AdCopyVariant]
-    image_id: Optional[int] = None
+    variants: List[Any]
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
 
 # ============================
 # 🔁 DB Dependency
 # ============================
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+async def get_db() -> AsyncSession:
+    async with AsyncSessionLocal() as session:
+        yield session
 
 
 # ============================
@@ -251,7 +230,7 @@ def translate_description(description_kr: str) -> str:
 def build_copy_user_prompt(
     strategy_id: int,
     strategy_name: str,
-    product_name: str,
+    product_name: Optional[str],  # <-- MAKE THIS OPTIONAL
     desc_kr: str,
     desc_en: str,
     fg_analysis: str,
@@ -279,7 +258,7 @@ Please generate 3 Korean ad copy variants following the system rules.
 def generate_copy_variants_gpt(
     strategy_id: int,
     strategy_name: str,
-    product_name: str,
+    product_name: Optional[str], # <-- FIX 3: Accept product_name here
     desc_kr: str,
     desc_en: str,
     fg_analysis: str,
@@ -289,7 +268,7 @@ def generate_copy_variants_gpt(
     )
 
     resp = client.chat.completions.create(
-        model="gpt-4.1",
+        model="gpt-4o",  # <-- FIX: Use a valid model name
         response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": GPT_COPY_SYSTEM_PROMPT},
@@ -325,7 +304,7 @@ app.add_middleware(
 # 🩺 Health Check
 # ---------------------------------
 @app.get("/healthz", status_code=200)
-def health_check():
+async def health_check():
     return {"status": "ok"}
 
 
@@ -333,13 +312,14 @@ def health_check():
 # 1️⃣ POST /translate-description
 # ---------------------------------
 @app.post("/translate-description", response_model=TranslateResponse)
-def translate_and_store(req: TranslateRequest, db: Session = Depends(get_db)):
+async def translate_and_store(req: TranslateRequest, db: AsyncSession = Depends(get_db)):
 
     if not req.description_kr.strip():
         raise HTTPException(status_code=400, detail="description_kr is empty")
 
     try:
-        description_en = translate_description(req.description_kr)
+        # Run synchronous OpenAI call in a separate thread to avoid blocking
+        description_en = await asyncio.to_thread(translate_description, req.description_kr)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Translation failed: {e}")
 
@@ -348,131 +328,102 @@ def translate_and_store(req: TranslateRequest, db: Session = Depends(get_db)):
         description_en=description_en,
     )
     db.add(record)
-    db.commit()
-    db.refresh(record)
+    await db.commit()
+    await db.refresh(record)
 
-    return TranslateResponse(
-        id=record.id,
-        description_kr=record.description_kr,
-        description_en=record.description_en,
-    )
+    return record
 
 
 # ---------------------------------
 # 2️⃣ POST /generate-copy-variants
 # ---------------------------------
 @app.post("/generate-copy-variants", response_model=GenerateCopyResponse)
-def generate_copy_variants(req: GenerateCopyRequest, db: Session = Depends(get_db)):
-
-    # 1) Fetch description from DB
-    desc: UserDescription = db.query(UserDescription).filter(
-        UserDescription.id == req.description_id
-    ).first()
-
+async def generate_copy_variants(req: GenerateCopyRequest, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(UserDescription).filter(UserDescription.id == req.description_id))
+    desc = result.scalar_one_or_none()
     if not desc:
-        raise HTTPException(
-            status_code=404,
-            detail=f"UserDescription id={req.description_id} not found",
-        )
-
-    # 2) Call GPT to generate 3 Korean variants
-    try:
-        gpt_result = generate_copy_variants_gpt(
-            strategy_id=req.strategy_id,
-            strategy_name=req.strategy_name,
-            product_name=req.product_name,
-            desc_kr=desc.description_kr,
-            desc_en=desc.description_en,
-            fg_analysis=req.foreground_analysis or "",
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"GPT copy generation failed: {e}")
-
-    variants_data = gpt_result.get("variants", [])
-    if not variants_data or len(variants_data) != 3:
-        raise HTTPException(
-            status_code=500,
-            detail="GPT result does not contain exactly 3 variants",
-        )
-
-    # 3) Store in DB
-    created_variants = []
-    new_ad_copies = []
-    for v in variants_data:
-        copy_ko = v.get("copy_ko", "").strip()
-        if not copy_ko:
-            continue
-
-       rec = AdCopy(
-            description_id=desc.id,
-            strategy_id=req.strategy_id,
-            strategy_name=req.strategy_name,
-            product_name=req.product_name,
-            copy_ko=copy_ko,
-            image_id=req.image_id,  # may be None
-        )
-
-        db.add(rec)
-        new_ad_copies.append(rec)
-
-    if not new_ad_copies:
-        raise HTTPException(
-            status_code=500, detail="No valid variants were created from GPT result"
-        )
-
-    db.commit()
-
-    for rec in new_ad_copies:
-        db.refresh(rec)
-        created_variants.append(
-            AdCopyVariant(
-                id=rec.id,
-                copy_ko=rec.copy_ko,
-            )
-        )
-
-    return GenerateCopyResponse(
-        description_id=desc.id,
+        raise HTTPException(status_code=404, detail=f"Description with id {req.description_id} not found")
+    
+    variants_data = await asyncio.to_thread(
+        generate_copy_variants_gpt,
         strategy_id=req.strategy_id,
         strategy_name=req.strategy_name,
-        product_name=req.product_name,
-        variants=created_variants,
+        product_name=None,
+        desc_kr=desc.description_kr,
+        desc_en=desc.description_en,
+        fg_analysis=req.foreground_analysis,
     )
+    
+    valid_variants = variants_data.get("variants", [])
+    if not valid_variants:
+        raise HTTPException(status_code=500, detail="No valid variants were created from GPT result")
+    
+    generation_record = AdCopyGeneration(
+        description_id=req.description_id,
+        strategy_id=req.strategy_id,
+        strategy_name=req.strategy_name,
+        image_id=req.image_id,
+        variants=valid_variants,
+    )
+    db.add(generation_record)
+    await db.commit()
+    await db.refresh(generation_record)
+
+    # --- FIX: Construct the correct response object ---
+    # The response model expects a 'generation_id' field, but our DB model has 'id'.
+    # We create a dictionary that matches the 'GenerateCopyResponse' model.
+    return {
+        "generation_id": generation_record.id,
+        "variants": generation_record.variants
+    }
 
 # ---------------------------------
 # 3 POST /upload-image
 # ---------------------------------
 @app.post("/upload-image", response_model=UploadImageResponse)
-async def upload_image(file: UploadFile = File(...)):
-    db: Session = next(get_db())
-
+async def upload_image(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided")
-
-    # Generate a unique filename
     ext = os.path.splitext(file.filename)[1].lower()
     unique_name = f"{uuid.uuid4().hex}{ext}"
     save_path = os.path.join(MEDIA_ROOT, unique_name)
-
-    # Save file to disk
     content = await file.read()
+    
     try:
-        with open(save_path, "wb") as f:
-            f.write(content)
+        # --- FIX: Define a helper function for the blocking I/O ---
+        def save_file_sync():
+            with open(save_path, "wb") as f:
+                f.write(content)
+        
+        # Run the helper function in a separate thread
+        await asyncio.to_thread(save_file_sync)
+        
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
-
-    # Store metadata in DB
-    record = UploadedImage(
-        file_path=save_path,
-        original_filename=file.filename,
-        content_type=file.content_type or "",
-    )
+         
+    record = UploadedImage(file_path=save_path, original_filename=file.filename, content_type=file.content_type or "")
     db.add(record)
-    db.commit()
-    db.refresh(record)
+    await db.commit()
+    await db.refresh(record)
+    return record
 
-    return UploadImageResponse(
-        id=record.id,
-        original_filename=record.original_filename,
-    )
+# --- ADD THIS NEW ENDPOINT ---
+# ---------------------------------
+# 4️⃣ GET /generations
+# ---------------------------------
+@app.get("/generations", response_model=List[GenerationResult])
+async def get_generations(db: AsyncSession = Depends(get_db), limit: int = 10):
+    result = await db.execute(select(AdCopyGeneration).order_by(AdCopyGeneration.created_at.desc()).limit(limit))
+    return result.scalars().all()
+
+# --- ADD THIS NEW ENDPOINT ---
+# ---------------------------------
+# 5️⃣ GET /generations/{generation_id}
+# ---------------------------------
+@app.get("/generations/{generation_id}", response_model=GenerationResult)
+async def get_generation_by_id(generation_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(AdCopyGeneration).filter(AdCopyGeneration.id == generation_id))
+    generation = result.scalar_one_or_none()
+    if not generation:
+        raise HTTPException(status_code=404, detail="Generation not found")
+    return generation

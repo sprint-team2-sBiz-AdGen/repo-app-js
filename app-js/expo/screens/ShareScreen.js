@@ -1,7 +1,8 @@
 import React from "react";
-import { View, Text, TouchableOpacity, StyleSheet, Alert } from "react-native";
+import { View, Text, TouchableOpacity, StyleSheet, Alert, Image } from "react-native";
 import * as Clipboard from "expo-clipboard";
 import { commonStyles as cs } from "./_styles";
+import ViewShot from "react-native-view-shot";
 
 export default function ShareScreen({ route, navigation }) {
   const { selected, description, strategy } = route.params || {};
@@ -15,7 +16,7 @@ export default function ShareScreen({ route, navigation }) {
 
   return (
     <View style={cs.container}>
-      <Text style={cs.title}>광고 & 해시태그</Text>
+      <Text style={cs.title}>광고 & 인스타그램 피드</Text>
       <Text style={cs.subtitle}>
         아래 내용을 복사해서 인스타그램 글쓰기 창에 붙여넣으시면 됩니다.
       </Text>
@@ -28,8 +29,13 @@ export default function ShareScreen({ route, navigation }) {
         <Text style={styles.value}>{fullCaption}</Text>
       </View>
 
+      <ViewShot style={styles.imageContainer}>
+        <Image source={{ uri: selected?.imageUri }} style={styles.image} />
+        <Text style={styles.overlayText}>{selected?.caption}</Text>
+      </ViewShot>
+
       <TouchableOpacity style={cs.primaryButton} onPress={copyToClipboard}>
-        <Text style={cs.primaryButtonText}>광고 & 해시태그 복사하기</Text>
+        <Text style={cs.primaryButtonText}>광고 & 인스타그램 피드 복사하기</Text>
       </TouchableOpacity>
 
       <TouchableOpacity
@@ -59,5 +65,24 @@ const styles = StyleSheet.create({
   value: {
     fontSize: 13,
     color: "#111827",
+  },
+  imageContainer: {
+    width: "100%",
+    height: 300,
+    marginTop: 16,
+    borderRadius: 12,
+    overflow: "hidden",
+  },
+  image: {
+    width: "100%",
+    height: "100%",
+    resizeMode: "cover",
+  },
+  overlayText: {
+    position: "absolute",
+    bottom: 20,
+    left: 20,
+    color: "white",
+    fontSize: 24,
   },
 });
