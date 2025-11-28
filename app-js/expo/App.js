@@ -34,7 +34,7 @@ export default function App() {
         <Stack.Screen
           name="PhotoAndDescription"
           component={PhotoAndDescriptionScreen}
-          options={{ title: "사진 & 한 줄 설명" }}
+          options={{ title: "사진 & 설명" }}
         />
         <Stack.Screen
           name="Generating"
@@ -49,7 +49,7 @@ export default function App() {
         <Stack.Screen
           name="Share"
           component={ShareScreen}
-          options={{ title: "공유하기" }}
+          options={{ title: "업로드" }}
         />
       </Stack.Navigator>
     </NavigationContainer>
