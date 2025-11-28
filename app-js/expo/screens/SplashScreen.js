@@ -12,7 +12,7 @@ export default function SplashScreen({ navigation }) {
   return (
     <View style={styles.container}>
       <Text style={styles.logo}>Feedly AI</Text>
-      <Text style={styles.tagline}>사진 한 장으로 만드는 F&B 인스타 광고</Text>
+      <Text style={styles.tagline}>사진 한 장으로 만드는 인스타 광고</Text>
     </View>
   );
 }
