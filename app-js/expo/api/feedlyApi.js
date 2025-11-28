@@ -2,59 +2,93 @@ import { API_BASE_URL } from "./config";
 
 async function handleResponse(res) {
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status} - ${text || res.statusText}`);
+    // Try to get more specific error info from the server response
+    const errorText = await res.text();
+    console.error("API Error Response:", errorText);
+    // Create a new error with a more descriptive message
+    throw new Error(`Network request failed with status ${res.status}: ${errorText}`);
   }
   return res.json();
 }
 
-export async function translateDescription(descriptionKr) {
-  const res = await fetch(`${API_BASE_URL}/translate-description`, {
-    method: "POST",
+export const translateDescription = async (description) => {
+  const response = await fetch(`${API_BASE_URL}/translate-description`, {
+    method: 'POST',
     headers: {
-      "Content-Type": "application/json",
+      'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ description_kr: descriptionKr }),
+    body: JSON.stringify({ description_kr: description }),
   });
-  return handleResponse(res); // { id, description_kr, description_en }
-}
 
-export async function generateCopyVariants({
-  descriptionId,
-  strategyId,
-  strategyName,
-  productName,
-  foregroundAnalysis = "",
-}) {
-  const res = await fetch(`${API_BASE_URL}/generate-copy-variants`, {
-    method: "POST",
+  if (!response.ok) {
+    throw new Error('Failed to translate description');
+  }
+  return response.json();
+};
+
+// --- FIX: Replace the entire generateCopyVariants function ---
+export const generateCopyVariants = async (payload) => {
+  // The 'payload' object contains { strategy_id, strategy_name, etc. }
+  // We must stringify this object to send it as a JSON body.
+  const response = await fetch(`${API_BASE_URL}/generate-copy-variants`, {
+    method: 'POST',
     headers: {
-      "Content-Type": "application/json",
+      'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      description_id: descriptionId,
-      strategy_id: strategyId,
-      strategy_name: strategyName,
-      product_name: productName,
-      foreground_analysis: foregroundAnalysis,
-    }),
+    body: JSON.stringify(payload),
   });
-  return handleResponse(res); // { description_id, strategy_id, ..., variants: [{id, copy_ko}, ...] }
-}
 
-export async function uploadImage(imageUri) {
+  return handleResponse(response);
+};
+
+export const uploadImage = async (imageUri) => {
+  // Create a new FormData object, which is required for file uploads.
   const formData = new FormData();
-  formData.append("file", {
+
+  // The local image URI (e.g., 'file:///...') needs to be prepared for the network request.
+  // We extract the filename from the end of the URI.
+  const filename = imageUri.split('/').pop();
+  
+  // We infer the image's MIME type (e.g., 'image/jpeg') from the filename extension.
+  const match = /\.(\w+)$/.exec(filename);
+  const type = match ? `image/${match[1]}` : `image`;
+
+  // This is the most critical step. We append the file data to the FormData object.
+  // The key 'file' MUST match the argument name in your FastAPI endpoint:
+  // `async def upload_image(file: UploadFile = File(...))`
+  formData.append('file', {
     uri: imageUri,
-    name: "upload.jpg",      // you can improve this later
-    type: "image/jpeg",      // or infer from extension
+    name: filename,
+    type: type,
   });
 
-  const res = await fetch(`${API_BASE_URL}/upload-image`, {
-    method: "POST",
+  // We now send the request.
+  const response = await fetch(`${API_BASE_URL}/upload-image`, {
+    method: 'POST',
     body: formData,
-    // ⚠️ Do NOT set Content-Type manually; fetch will set the boundary for multipart/form-data
+    headers: {
+      // This header is essential. It tells the server to expect a file, not JSON.
+      'Content-Type': 'multipart/form-data',
+    },
   });
 
-  return handleResponse(res); // { id, original_filename }
-}
+  // The handleResponse function will process the server's reply.
+  return handleResponse(response);
+};
+
+export const getLatestGenerations = async () => {
+  const response = await fetch(`${API_BASE_URL}/generations`);
+
+  if (!response.ok) {
+    throw new Error("Failed to fetch latest generations");
+  }
+  return response.json();
+};
+
+export const getGenerationById = async (generationId) => {
+  const response = await fetch(`${API_BASE_URL}/generations/${generationId}`);
+  if (!response.ok) {
+    throw new Error("Failed to fetch generation by ID");
+  }
+  return response.json();
+};
