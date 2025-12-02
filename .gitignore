@@ -16,5 +16,5 @@ build/
 uv.lock
 
 # Node
-node_modules/
-.expo/
+./app-js/expo/node_modules/
+./app-js/expo/.expo/
