@@ -1,138 +1,43 @@
 import os
-import json
 import uuid
+import json
 import asyncio
-from fastapi import UploadFile, File
+from fastapi import FastAPI, Depends, UploadFile, File, Form, HTTPException, Request
 from contextlib import asynccontextmanager
 from datetime import datetime
+from typing import List, Any, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional, Any
+from openai import OpenAI
 
 # --- Use Async SQLAlchemy components ---
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Integer
+from sqlalchemy.dialects.postgresql import UUID, JSONB 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 from sqlalchemy.future import select
 
-from openai import OpenAI
-
 # ============================
 # 🔐 Environment & Config
 # ============================
-
 load_dotenv()
-
-POSTGRES_USER = os.getenv("POSTGRES_USER", "feedlyai")
-POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "feedlyai_dev_password_74154")
-POSTGRES_DB = os.getenv("POSTGRES_DB", "feedlyai")
-POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
-POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")
-
-# --- Use the asyncpg driver ---
-DATABASE_URL = f"postgresql+asyncpg://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
-
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://feedlyai:feedlyai_dev_password_74154@localhost:5432/feedlyai")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY not set")
+if not OPENAI_API_KEY: raise RuntimeError("OPENAI_API_KEY not set")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DEFAULT_MEDIA_ROOT = os.path.join(PROJECT_ROOT, "media", "uploads")
-MEDIA_ROOT = os.getenv("MEDIA_ROOT", DEFAULT_MEDIA_ROOT)
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+MEDIA_ROOT = os.path.join(PROJECT_ROOT, "media", "uploads")
 os.makedirs(MEDIA_ROOT, exist_ok=True)
 
 # ============================
-# 💾 SQLAlchemy Async Setup
+# 🧠 CORE 8-STRATEGY PROMPT ENGINEERING
 # ============================
-
-Base = declarative_base()
-engine = create_async_engine(DATABASE_URL, echo=False)
-AsyncSessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
-
-# --- Models (Unchanged) ---
-class UserDescription(Base):
-    __tablename__ = "user_descriptions"
-    id = Column(Integer, primary_key=True, index=True)
-    description_kr = Column(Text, nullable=False)
-    description_en = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    generations = relationship("AdCopyGeneration", back_populates="description")
-
-class UploadedImage(Base):
-    __tablename__ = "uploaded_images"
-    id = Column(Integer, primary_key=True, index=True)
-    file_path = Column(String(512), nullable=False)
-    original_filename = Column(String(255), nullable=False)
-    content_type = Column(String(100), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    generations = relationship("AdCopyGeneration", back_populates="image")
-
-class AdCopyGeneration(Base):
-    __tablename__ = "ad_copy_generations"
-    id = Column(Integer, primary_key=True, index=True)
-    description_id = Column(Integer, ForeignKey("user_descriptions.id"), nullable=False)
-    strategy_id = Column(Integer, nullable=False)
-    strategy_name = Column(String(100), nullable=False)
-    image_id = Column(Integer, ForeignKey("uploaded_images.id"), nullable=True)
-    variants = Column(JSONB, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    description = relationship("UserDescription", back_populates="generations")
-    image = relationship("UploadedImage", back_populates="generations")
-
-async def init_db():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    print("✅ Database tables created successfully.")
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    print("🚀 Application startup...")
-    await init_db()
-    yield
-    print("👋 Application shutdown.")
-
-# ============================
-# 🧠 GPT System Prompts
-# ============================
-
-TRANSLATION_SYSTEM_PROMPT = """
-You are a professional marketing copy translator.
-
-Task:
-- Input: a Korean sentence or short paragraph written by a small F&B business owner
-  describing their menu item, store concept, or selling point.
-- Output: a NATURAL English version that sounds like it was originally written in English
-  for an Instagram ad context.
-
-Rules:
-- Keep meaning and nuance, but do NOT translate word-by-word.
-- Make it sound smooth and marketing-friendly.
-- One or two sentences maximum.
-- Output JSON ONLY:
-  { "translation_en": "..." }
-"""
-
+TRANSLATION_SYSTEM_PROMPT = "You are a professional marketing copy translator. Your task is to translate a Korean description of a food menu item into natural, marketing-friendly English. Do NOT translate word-for-word. Output JSON ONLY: {\"translation_en\": \"...\"}"
 GPT_COPY_SYSTEM_PROMPT = """
-You are Feedly AI, an AI assistant that generates Korean Instagram ad copy
-for small F&B business owners.
-
-You will be given:
-- strategy_id (1–8)
-- strategy_name (in English)
-- product_name (in Korean or English)
-- user_description_kr: Korean text from the owner
-- user_description_en: English translation of that text
-- foreground_analysis: a description of the masked food subject from LLAVA (may be empty).
-
-Your tasks:
-1. Generate THREE different Korean ad copy options for Instagram.
-2. Each option must contain:
-   - "copy_ko": a natural, marketing-friendly Korean sentence or two.
+You are Feedly AI, an AI assistant that generates Korean Instagram ad copy for small F&B business owners. You will be given a strategy and a description. Your task is to generate THREE distinct Korean ad copy options.
 
 Strategy tones:
   1. Hero Dish Focus — emphasize visual deliciousness & texture.
@@ -140,18 +45,15 @@ Strategy tones:
   3. Behind-the-Scenes — sincerity, craftsmanship.
   4. Lifestyle — cozy, everyday scene.
   5. UGC / Social Proof — authentic, casual customer vibe.
-  6. Minimalist Branding — clean, premium, fewer words.
+  6. Minimalist Branding — clean, premium, one short sentence.
   7. Emotion / Comfort — warm, nostalgic.
   8. Retro / Vintage — storytelling, old-days atmosphere.
 
 Rules:
 - Output ONLY Korean copy for each variant.
-- For Minimalist Branding (strategy_id 6): use exactly ONE short sentence, clean and restrained.
-- For other strategies: 1–2 sentences per variant.
-- Each of the 3 variants must feel clearly different (focus, angle, nuance).
+- Each of the 3 variants must feel clearly different.
 - Do NOT include hashtags or emojis.
 - Output JSON ONLY, with this format:
-
 {
   "variants": [
     { "copy_ko": "..." },
@@ -160,270 +62,223 @@ Rules:
   ]
 }
 """
-
-
-# ============================
-# --- Pydantic Models ---
-# ============================
-
-class UploadImageResponse(BaseModel):
-    id: int
-    original_filename: str
-
-class TranslateRequest(BaseModel):
-    description_kr: str
-
-class TranslateResponse(BaseModel):
-    id: int
-    description_kr: str
-    description_en: str
-
-class GenerateCopyRequest(BaseModel):
-    description_id: int
-    strategy_id: int
-    strategy_name: str
-    image_id: Optional[int] = None
-    foreground_analysis: Optional[str] = ""
-
-# --- FIX: Consolidated Response Models ---
-class GenerateCopyResponse(BaseModel):
-    generation_id: int
-    variants: List[Any]
-
-class GenerationResult(BaseModel):
-    id: int
-    strategy_name: str
-    variants: List[Any]
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
-
-# ============================
-# 🔁 DB Dependency
-# ============================
-
-async def get_db() -> AsyncSession:
-    async with AsyncSessionLocal() as session:
-        yield session
-
-
-# ============================
-# 🤖 GPT Call Helpers
-# ============================
-
-def translate_description(description_kr: str) -> str:
-    """Korean → natural English via GPT."""
-    resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": TRANSLATION_SYSTEM_PROMPT},
-            {"role": "user", "content": description_kr},
-        ],
-        temperature=0.3,
-    )
-    data = json.loads(resp.choices[0].message.content)
-    return data["translation_en"].strip()
-
-
-def build_copy_user_prompt(
-    strategy_id: int,
-    strategy_name: str,
-    product_name: Optional[str],  # <-- MAKE THIS OPTIONAL
-    desc_kr: str,
-    desc_en: str,
-    fg_analysis: str,
-) -> str:
-    return f"""
-strategy_id: {strategy_id}
-strategy_name: {strategy_name}
-
-product_name:
-{product_name}
-
-user_description_kr:
-{desc_kr}
-
-user_description_en:
-{desc_en}
-
-foreground_analysis:
-{fg_analysis}
-
-Please generate 3 Korean ad copy variants following the system rules.
+ENG_TO_KOR_TRANSLATION_PROMPT = """
+You are a professional marketing copy translator specializing in Instagram food ads. Translate each English ad copy variant into natural, appealing Korean. Preserve marketing tone. No hashtags. No emojis.
+Output JSON ONLY:
+{
+  "variants": [
+    {"copy_ko": "..."},
+    {"copy_ko": "..."},
+    {"copy_ko": "..."}
+  ]
+}
 """
 
+# ============================
+# 💾 SQLAlchemy Async Setup
+# ============================
+Base = declarative_base()
+engine = create_async_engine(DATABASE_URL, echo=False)
+AsyncSessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 
-def generate_copy_variants_gpt(
-    strategy_id: int,
-    strategy_name: str,
-    product_name: Optional[str], # <-- FIX 3: Accept product_name here
-    desc_kr: str,
-    desc_en: str,
-    fg_analysis: str,
-) -> dict:
-    user_prompt = build_copy_user_prompt(
-        strategy_id, strategy_name, product_name, desc_kr, desc_en, fg_analysis
-    )
+# --- Official, Unified Database Models (Using UUID as per schema) ---
+class Job(Base):
+    __tablename__ = 'jobs'
+    job_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # optional: add tenant_id/store_id if present in DB
+    # tenant_id = Column(String)
+    # store_id = Column(UUID(as_uuid=True), ForeignKey('stores.store_id'))
+    status = Column(String, default='queued')
+    current_step = Column(String)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    inputs = relationship("JobInput", back_populates="job", uselist=False)
 
-    resp = client.chat.completions.create(
-        model="gpt-4o",  # <-- FIX: Use a valid model name
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": GPT_COPY_SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.7,
-    )
-    return json.loads(resp.choices[0].message.content)
+class ImageAsset(Base):
+    __tablename__ = 'image_assets'
+    image_asset_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    image_url = Column(String, nullable=False)
+    # optional: add image_type if exists
+    # image_type = Column(String)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
+class JobInput(Base):
+    __tablename__ = 'job_inputs'
+    pk = Column(Integer, primary_key=True, autoincrement=True)  # matches SERIAL pk
+    job_id = Column(UUID(as_uuid=True), ForeignKey('jobs.job_id'), nullable=False)
+    img_asset_id = Column(UUID(as_uuid=True), ForeignKey('image_assets.image_asset_id'), nullable=False)  # exact column name
+    desc_kor = Column(Text)
+    desc_eng = Column(Text)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    job = relationship("Job", back_populates="inputs")
+
+class TxtAdCopyGeneration(Base):
+    __tablename__ = 'txt_ad_copy_generations'
+    ad_copy_gen_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    job_id = Column(UUID(as_uuid=True), ForeignKey('jobs.job_id'))
+    strategy_id = Column(String)
+    strategy_name = Column(String)
+    ad_copy_variants = Column(JSONB)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+# --- Pydantic Models & Form Dependency Class ---
+class JobCreateRequest(BaseModel):
+    description: str
+
+class AdCopyEngRequest(BaseModel):
+    job_id: str
+    strategy_id: int
+    strategy_name: str
+
+class KorToEngRequest(BaseModel):
+    job_id: str
+
+class AdCopyKorRequest(BaseModel):
+    job_id: str
+    strategy_id: int
+    strategy_name: str
 
 # ============================
-# 🚀 FastAPI App
+# 🚀 FastAPI App & Helpers
 # ============================
+async def get_db():
+    async with AsyncSessionLocal() as session: yield session
 
-app = FastAPI(
-    title="Ad Copy Generator API",
-    description="User descriptions to generate ad copies using GPT.",
-    version="1.0.0",
-    lifespan=lifespan,
-)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("🚀 Application startup...")
+    yield
+    print("👋 Application shutdown.")
 
-# allow Expo dev URLs, adjust as needed
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # for dev; tighten later
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI(title="Feedly AI - 8 Strategy API", version="4.0.0", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-
-# ---------------------------------
-# 🩺 Health Check
-# ---------------------------------
-@app.get("/healthz", status_code=200)
-async def health_check():
-    return {"status": "ok"}
-
-
-# ---------------------------------
-# 1️⃣ POST /translate-description
-# ---------------------------------
-@app.post("/translate-description", response_model=TranslateResponse)
-async def translate_and_store(req: TranslateRequest, db: AsyncSession = Depends(get_db)):
-
-    if not req.description_kr.strip():
-        raise HTTPException(status_code=400, detail="description_kr is empty")
-
+async def call_gpt(system_prompt: str, user_prompt: str) -> dict:
     try:
-        # Run synchronous OpenAI call in a separate thread to avoid blocking
-        description_en = await asyncio.to_thread(translate_description, req.description_kr)
+        resp = await asyncio.to_thread(
+            client.chat.completions.create,
+            model="gpt-4o", response_format={"type": "json_object"},
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+            temperature=0.7,
+        )
+        return json.loads(resp.choices[0].message.content)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Translation failed: {e}")
+        raise HTTPException(status_code=500, detail=f"OpenAI API error: {e}")
 
-    record = UserDescription(
-        description_kr=req.description_kr.strip(),
-        description_en=description_en,
-    )
-    db.add(record)
-    await db.commit()
-    await db.refresh(record)
+# ============================
+# 🔗 API Endpoints
+# ============================
+@app.get("/", include_in_schema=False)
+async def root(): return {"message": "Feedly AI API is running"}
 
-    return record
+# Replace the existing create_job endpoint with this more tolerant version
+@app.post("/api/v1/jobs/create")
+async def create_job(
+    image: UploadFile = File(...),
+    request_field: Optional[str] = Form(None, alias="request"),
+    description_field: Optional[str] = Form(None, alias="description"),
+    db: AsyncSession = Depends(get_db)
+):
+    # Log raw inputs to confirm parser
+    print("DEBUG request_field:", request_field)
+    print("DEBUG description_field:", description_field)
+    if image is None:
+        raise HTTPException(status_code=422, detail="Missing file field 'image'")
 
-
-# ---------------------------------
-# 2️⃣ POST /generate-copy-variants
-# ---------------------------------
-@app.post("/generate-copy-variants", response_model=GenerateCopyResponse)
-async def generate_copy_variants(req: GenerateCopyRequest, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(UserDescription).filter(UserDescription.id == req.description_id))
-    desc = result.scalar_one_or_none()
-    if not desc:
-        raise HTTPException(status_code=404, detail=f"Description with id {req.description_id} not found")
-    
-    variants_data = await asyncio.to_thread(
-        generate_copy_variants_gpt,
-        strategy_id=req.strategy_id,
-        strategy_name=req.strategy_name,
-        product_name=None,
-        desc_kr=desc.description_kr,
-        desc_en=desc.description_en,
-        fg_analysis=req.foreground_analysis,
-    )
-    
-    valid_variants = variants_data.get("variants", [])
-    if not valid_variants:
-        raise HTTPException(status_code=500, detail="No valid variants were created from GPT result")
-    
-    generation_record = AdCopyGeneration(
-        description_id=req.description_id,
-        strategy_id=req.strategy_id,
-        strategy_name=req.strategy_name,
-        image_id=req.image_id,
-        variants=valid_variants,
-    )
-    db.add(generation_record)
-    await db.commit()
-    await db.refresh(generation_record)
-
-    # --- FIX: Construct the correct response object ---
-    # The response model expects a 'generation_id' field, but our DB model has 'id'.
-    # We create a dictionary that matches the 'GenerateCopyResponse' model.
-    return {
-        "generation_id": generation_record.id,
-        "variants": generation_record.variants
-    }
-
-# ---------------------------------
-# 3 POST /upload-image
-# ---------------------------------
-@app.post("/upload-image", response_model=UploadImageResponse)
-async def upload_image(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="No filename provided")
-    ext = os.path.splitext(file.filename)[1].lower()
-    unique_name = f"{uuid.uuid4().hex}{ext}"
-    save_path = os.path.join(MEDIA_ROOT, unique_name)
-    content = await file.read()
-    
+    # Prefer 'request' JSON, fallback to plain 'description'
+    raw = request_field or description_field
+    if not raw:
+        raise HTTPException(status_code=422, detail="Missing form field: 'request' or 'description'")
     try:
-        # --- FIX: Define a helper function for the blocking I/O ---
-        def save_file_sync():
-            with open(save_path, "wb") as f:
-                f.write(content)
-        
-        # Run the helper function in a separate thread
-        await asyncio.to_thread(save_file_sync)
-        
+        data = json.loads(raw) if raw.strip().startswith("{") else {"description": raw}
+        description = data["description"]
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
-         
-    record = UploadedImage(file_path=save_path, original_filename=file.filename, content_type=file.content_type or "")
-    db.add(record)
+        raise HTTPException(status_code=422, detail=f"Invalid description payload: {e}")
+
+    # Save image
+    filename = f"{uuid.uuid4().hex}{os.path.splitext(image.filename)[1]}"
+    path = os.path.join(MEDIA_ROOT, filename)
+    try:
+        with open(path, "wb") as f:
+            f.write(await image.read())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save image: {e}")
+
+    # DB writes (ensure column names match schema)
+    new_image = ImageAsset(image_url=path)
+    new_job = Job(status="running")
+    db.add_all([new_image, new_job])
+    await db.flush()
+
+    new_input = JobInput(
+        job_id=new_job.job_id,
+        img_asset_id=new_image.image_asset_id,  # matches DB column name
+        desc_kor=description,
+    )
+    db.add(new_input)
     await db.commit()
-    await db.refresh(record)
-    return record
 
-# --- ADD THIS NEW ENDPOINT ---
-# ---------------------------------
-# 4️⃣ GET /generations
-# ---------------------------------
-@app.get("/generations", response_model=List[GenerationResult])
-async def get_generations(db: AsyncSession = Depends(get_db), limit: int = 10):
-    result = await db.execute(select(AdCopyGeneration).order_by(AdCopyGeneration.created_at.desc()).limit(limit))
-    return result.scalars().all()
+    return {"job_id": str(new_job.job_id), "status": "job_created"}
 
-# --- ADD THIS NEW ENDPOINT ---
-# ---------------------------------
-# 5️⃣ GET /generations/{generation_id}
-# ---------------------------------
-@app.get("/generations/{generation_id}", response_model=GenerationResult)
-async def get_generation_by_id(generation_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(AdCopyGeneration).filter(AdCopyGeneration.id == generation_id))
-    generation = result.scalar_one_or_none()
-    if not generation:
-        raise HTTPException(status_code=404, detail="Generation not found")
-    return generation
+@app.post("/api/js/gpt/kor-to-eng")
+async def gpt_kor_to_eng(req: KorToEngRequest, db: AsyncSession = Depends(get_db)):
+    job_id = uuid.UUID(req.job_id)
+    job_input = (await db.execute(select(JobInput).filter(JobInput.job_id == job_id))).scalar_one()
+    
+    gpt_result = await call_gpt(TRANSLATION_SYSTEM_PROMPT, job_input.desc_kor)
+    job_input.desc_eng = gpt_result.get("translation_en", "Translation failed.")
+    
+    await db.commit()
+    return {"job_id": str(job_id), "desc_eng": job_input.desc_eng}
+
+@app.post("/api/js/gpt/ad-copy-eng")
+async def gpt_ad_copy_eng(req: AdCopyEngRequest, db: AsyncSession = Depends(get_db)):
+    job_id = uuid.UUID(req.job_id)
+    job_input = (await db.execute(select(JobInput).filter(JobInput.job_id == job_id))).scalar_one()
+    if not job_input.desc_eng: raise HTTPException(404, "English description not found.")
+
+    user_prompt = f"strategy_id: {req.strategy_id}\nstrategy_name: {req.strategy_name}\nuser_description_kr: {job_input.desc_kor}\nuser_description_en: {job_input.desc_eng}"
+    gpt_result = await call_gpt(GPT_COPY_SYSTEM_PROMPT, user_prompt)
+    variants = gpt_result.get("variants", [])
+
+    gen_record = TxtAdCopyGeneration(
+        job_id=job_id,
+        strategy_id=str(req.strategy_id),
+        strategy_name=req.strategy_name,
+        ad_copy_variants=variants
+    )
+    db.add(gen_record)
+    await db.commit()
+    return {"job_id": str(job_id), "variants": variants}
+
+@app.post("/api/js/gpt/ad-copy-kor")
+async def gpt_ad_copy_kor(req: AdCopyKorRequest, db: AsyncSession = Depends(get_db)):
+    job_id = uuid.UUID(req.job_id)
+    # 1. Get latest English variants for this strategy
+    eng_gen_result = await db.execute(
+        select(TxtAdCopyGeneration)
+        .filter(
+            TxtAdCopyGeneration.job_id == job_id,
+            TxtAdCopyGeneration.strategy_id == str(req.strategy_id),
+            TxtAdCopyGeneration.strategy_name == req.strategy_name
+        )
+        .order_by(TxtAdCopyGeneration.created_at.desc())
+    )
+    eng_gen = eng_gen_result.scalars().first()
+    if not eng_gen or not eng_gen.ad_copy_variants:
+        raise HTTPException(status_code=404, detail="English ad copy variants not found for translation.")
+    english_variants_json = json.dumps(eng_gen.ad_copy_variants)
+    # 2. Translate to Korean
+    gpt_result = await call_gpt(ENG_TO_KOR_TRANSLATION_PROMPT, english_variants_json)
+    variants_ko = gpt_result.get("variants", [])
+    if not variants_ko:
+        raise HTTPException(status_code=500, detail="Translation failed.")
+    # 3. Persist Korean variants
+    ko_record = TxtAdCopyGeneration(
+        job_id=job_id,
+        strategy_id=str(req.strategy_id),
+        strategy_name=req.strategy_name,
+        ad_copy_variants=variants_ko
+    )
+    db.add(ko_record)
+    await db.commit()
+    return {"job_id": str(job_id), "variants_ko": variants_ko}

@@ -5,4 +5,4 @@
 // export const API_BASE_URL = "http://localhost:8012";
 
 // Use your server's public IP address
-export const API_BASE_URL = "http://34.9.178.28:8012";
+// export const API_BASE_URL = "http://34.9.178.28:8012";

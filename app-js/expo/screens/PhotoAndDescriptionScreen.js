@@ -2,7 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { View, Text, TouchableOpacity, Image, TextInput, StyleSheet, Alert, ScrollView, ActivityIndicator, Linking, KeyboardAvoidingView, Platform } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { commonStyles as cs } from './_styles';
-import { uploadImage, translateDescription } from '../api/feedlyApi';
+import { createGenerationJob } from '../api/feedlyApi'; // <--- Import the NEW function
 import { STRATEGIES } from '../constants/strategies';
 
 export default function PhotoAndDescriptionScreen({ route, navigation }) {
@@ -55,24 +55,22 @@ export default function PhotoAndDescriptionScreen({ route, navigation }) {
     setIsLoading(true);
 
     try {
-      let imageId = null;
-      if (imageUri) {
-        const uploadResponse = await uploadImage(imageUri);
-        imageId = uploadResponse.id;
-      }
-
-      const translateResponse = await translateDescription(description);
-      const descriptionId = translateResponse.id;
-
-      navigation.navigate("Generating", {
-        strategy,
-        imageId,
-        descriptionId,
-      });
+      console.log("--- Starting Generation Job ---");
+      
+      // 1. Call the NEW API endpoint
+      const result = await createGenerationJob(imageUri, description);
+      
+      console.log("--- Job Started Successfully ---", result);
+      
+      // 2. Navigate to the next screen (or show success)
+      // For now, we just alert the Job ID. Later we will navigate to a 'Generating' screen.
+      Alert.alert("Success", `Job Started! ID: ${result.job_id}`);
+      
+      // navigation.navigate('GeneratingScreen', { jobId: result.job_id });
 
     } catch (error) {
-      console.error("An error occurred during generation:", error);
-      Alert.alert("오류", `생성 중 오류가 발생했습니다: ${error.message}`);
+      console.error("Generation failed:", error);
+      Alert.alert("Error", "Failed to start generation. Check console for details.");
     } finally {
       setIsLoading(false);
     }
