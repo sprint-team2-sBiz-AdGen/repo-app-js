@@ -82,16 +82,14 @@ export const getGenerationById = async (generationId) => {
 };
 
 export const createGenerationJob = async (imageUri, description) => {
-  // React Native FormData의 { uri, name, type } 형식이 서버에서 문자열로 변환되는 문제를 해결하기 위해
-  // 서버에서 base64 이미지를 처리할 수 있도록 수정했습니다.
-  // React Native에서는 여전히 FormData의 { uri, name, type } 형식을 사용하되,
-  // 서버에서 이를 처리할 수 있도록 base64 필드도 함께 전송합니다.
+  // Job 생성 API 호출
+  // 서버에서 DEFAULT_USER_ID를 기준으로 자동으로 user, tenant, store를 생성/조회합니다.
+  // 클라이언트는 image와 description만 전송하면 됩니다.
 
   const formData = new FormData();
   const name = imageUri.split('/').pop() || 'upload.jpg';
 
   // React Native FormData 형식: { uri, name, type }
-  // 서버에서 이를 처리할 수 있도록 시도
   formData.append('image', {
     uri: imageUri,
     name: name,
