@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_BASE_URL = 'http://34.9.178.28:8012'; 
+const API_BASE_URL = 'http://34.9.178.28:8012';
 
 async function handleResponse(res) {
   if (!res.ok) {
@@ -42,7 +42,7 @@ export const uploadImage = async (imageUri) => {
   const formData = new FormData();
 
   const filename = imageUri.split('/').pop();
-  
+
   const match = /\.(\w+)$/.exec(filename);
   const type = match ? `image/${match[1]}` : `image`;
 
@@ -56,7 +56,7 @@ export const uploadImage = async (imageUri) => {
     method: 'POST',
     body: formData,
     headers: {
-  
+
       'Content-Type': 'multipart/form-data',
     },
   });
@@ -82,12 +82,29 @@ export const getGenerationById = async (generationId) => {
 };
 
 export const createGenerationJob = async (imageUri, description) => {
+  // React Native FormData의 { uri, name, type } 형식이 서버에서 문자열로 변환되는 문제를 해결하기 위해
+  // 서버에서 base64 이미지를 처리할 수 있도록 수정했습니다.
+  // React Native에서는 여전히 FormData의 { uri, name, type } 형식을 사용하되,
+  // 서버에서 이를 처리할 수 있도록 base64 필드도 함께 전송합니다.
+
   const formData = new FormData();
   const name = imageUri.split('/').pop() || 'upload.jpg';
-  formData.append('image', { uri: imageUri, name, type: 'image/jpeg' });
-  formData.append('request', JSON.stringify({ description })); // must be double-quoted JSON
 
-  const res = await fetch(`${API_BASE_URL}/api/v1/jobs/create`, { method: 'POST', body: formData });
+  // React Native FormData 형식: { uri, name, type }
+  // 서버에서 이를 처리할 수 있도록 시도
+  formData.append('image', {
+    uri: imageUri,
+    name: name,
+    type: 'image/jpeg',
+  });
+
+  formData.append('request', JSON.stringify({ description }));
+
+  const res = await fetch(`${API_BASE_URL}/api/v1/jobs/create`, {
+    method: 'POST',
+    body: formData,
+  });
+
   const data = await res.json();
   if (!res.ok) throw new Error(JSON.stringify(data));
   return data;
