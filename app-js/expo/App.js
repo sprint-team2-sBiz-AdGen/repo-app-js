@@ -26,6 +26,9 @@ export default function App() {
           component={HomeScreen}
           options={{ title: "Feedly AI" }}
         />
+        <Stack.Screen 
+          name="GeneratingScreen" 
+          component={GeneratingScreen} />
         <Stack.Screen
           name="StrategySelect"
           component={StrategySelectScreen}

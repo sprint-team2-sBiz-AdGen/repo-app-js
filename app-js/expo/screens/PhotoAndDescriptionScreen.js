@@ -2,7 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { View, Text, TouchableOpacity, Image, TextInput, StyleSheet, Alert, ScrollView, ActivityIndicator, Linking, KeyboardAvoidingView, Platform } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { commonStyles as cs } from './_styles';
-import { createGenerationJob } from '../api/feedlyApi'; // <--- Import the NEW function
+import { createGenerationJob, gptKorToEng, gptAdCopyEng, gptAdCopyKor } from '../api/feedlyApi'; // <--- Import the NEW function
 import { STRATEGIES } from '../constants/strategies';
 
 export default function PhotoAndDescriptionScreen({ route, navigation }) {
@@ -48,25 +48,29 @@ export default function PhotoAndDescriptionScreen({ route, navigation }) {
 
   const handleGenerate = async () => {
     if (!description.trim()) {
-      Alert.alert("입력 필요", "광고 문구에 대한 설명을 입력해 주세요.");
+      Alert.alert("입력 필요", "광고에 대한 설명을 입력해 주세요.");
       return;
     }
 
     setIsLoading(true);
 
     try {
-      console.log("--- Starting Generation Job ---");
-      
+      //console.log("--- Starting Generation Job ---");
+    
       // 1. Call the NEW API endpoint
       const result = await createGenerationJob(imageUri, description);
       
-      console.log("--- Job Started Successfully ---", result);
+      gptKorToEng(result.job_id)
+      gptAdCopyEng(result.job_id)
+      gptAdCopyKor(result.job_id)
+
+      // console.log("--- Job Started Successfully ---", result);
       
       // 2. Navigate to the next screen (or show success)
       // For now, we just alert the Job ID. Later we will navigate to a 'Generating' screen.
-      Alert.alert("Success", `Job Started! ID: ${result.job_id}`);
+      // Alert.alert("Success", `Job Started! ID: ${result.job_id}`);
       
-      // navigation.navigate('GeneratingScreen', { jobId: result.job_id });
+      navigation.navigate('GeneratingScreen', { jobId: result.job_id });
 
     } catch (error) {
       console.error("Generation failed:", error);

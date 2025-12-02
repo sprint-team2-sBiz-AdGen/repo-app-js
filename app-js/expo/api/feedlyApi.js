@@ -11,32 +11,32 @@ async function handleResponse(res) {
   return res.json();
 }
 
-export const translateDescription = async (description) => {
-  const response = await fetch(`${API_BASE_URL}/translate-description`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ description_kr: description }),
-  });
+// export const translateDescription = async (description) => {
+//   const response = await fetch(`${API_BASE_URL}/translate-description`, {
+//     method: 'POST',
+//     headers: {
+//       'Content-Type': 'application/json',
+//     },
+//     body: JSON.stringify({ description_kr: description }),
+//   });
 
-  if (!response.ok) {
-    throw new Error('Failed to translate description');
-  }
-  return response.json();
-};
+//   if (!response.ok) {
+//     throw new Error('Failed to translate description');
+//   }
+//   return response.json();
+// };
 
-export const generateCopyVariants = async (payload) => {
-  const response = await fetch(`${API_BASE_URL}/generate-copy-variants`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(payload),
-  });
+// export const generateCopyVariants = async (payload) => {
+//   const response = await fetch(`${API_BASE_URL}/generate-copy-variants`, {
+//     method: 'POST',
+//     headers: {
+//       'Content-Type': 'application/json',
+//     },
+//     body: JSON.stringify(payload),
+//   });
 
-  return handleResponse(response);
-};
+//   return handleResponse(response);
+// };
 
 export const uploadImage = async (imageUri) => {
   const formData = new FormData();
@@ -82,14 +82,10 @@ export const getGenerationById = async (generationId) => {
 };
 
 export const createGenerationJob = async (imageUri, description) => {
-  // Job 생성 API 호출
-  // 서버에서 DEFAULT_USER_ID를 기준으로 자동으로 user, tenant, store를 생성/조회합니다.
-  // 클라이언트는 image와 description만 전송하면 됩니다.
 
   const formData = new FormData();
   const name = imageUri.split('/').pop() || 'upload.jpg';
 
-  // React Native FormData 형식: { uri, name, type }
   formData.append('image', {
     uri: imageUri,
     name: name,
@@ -101,6 +97,49 @@ export const createGenerationJob = async (imageUri, description) => {
   const res = await fetch(`${API_BASE_URL}/api/v1/jobs/create`, {
     method: 'POST',
     body: formData,
+  });
+
+  const data = await res.json();
+  if (!res.ok) throw new Error(JSON.stringify(data));
+  return data;
+};
+
+
+export const gptKorToEng = async (jobId) => {
+  const res = await fetch(`${API_BASE_URL}/api/js/gpt/kor-to-eng`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ job_id: jobId }),
+  });
+
+  const data = await res.json();
+  if (!res.ok) throw new Error(JSON.stringify(data));
+  return data;
+};
+
+export const gptAdCopyEng = async (jobId) => {
+  const res = await fetch(`${API_BASE_URL}/api/js/gpt/ad-copy-eng`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ job_id: jobId }),
+  });
+
+  const data = await res.json();
+  if (!res.ok) throw new Error(JSON.stringify(data));
+  return data;
+};
+
+export const gptAdCopyKor = async (jobId) => {
+  const res = await fetch(`${API_BASE_URL}/api/js/gpt/ad-copy-kor`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ job_id: jobId }),
   });
 
   const data = await res.json();
