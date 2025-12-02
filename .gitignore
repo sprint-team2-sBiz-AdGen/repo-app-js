@@ -16,5 +16,9 @@ build/
 uv.lock
 
 # Node
-./app-js/expo/node_modules/
-./app-js/expo/.expo/
+app-js/expo/node_modules/
+app-js/expo/.expo/
+
+.media/uploads/
+app-js/media/uploads/
+app-js/fastapi/media/uploads/
