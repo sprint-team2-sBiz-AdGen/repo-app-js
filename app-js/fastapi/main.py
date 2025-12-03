@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Optional
+from fastapi.staticfiles import StaticFiles
 
 from openai import OpenAI
 
@@ -40,6 +41,13 @@ DEFAULT_USER_ID = os.getenv("DEFAULT_USER_ID")            # users.user_id UUID f
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+# --- CORRECTED ASSET PATHS ---
+# This is the directory on your server where the final images are stored, as per your screenshot.
+ASSETS_ROOT = "/opt/feedlyai/assets"
+# This is the URL prefix under which the assets will be served.
+ASSETS_URL_PREFIX = "/assets"
+
+# This media root is for temporary uploads, not the final assets.
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 MEDIA_ROOT = os.path.join(PROJECT_ROOT, "media", "uploads")
 os.makedirs(MEDIA_ROOT, exist_ok=True)
@@ -48,42 +56,23 @@ os.makedirs(MEDIA_ROOT, exist_ok=True)
 # 🧠 CORE 8-STRATEGY PROMPT ENGINEERING
 # ============================
 TRANSLATION_SYSTEM_PROMPT = "You are a professional marketing copy translator. Your task is to translate a Korean description of a food menu item into natural, marketing-friendly English. Do NOT translate word-for-word. Output JSON ONLY: {\"translation_en\": \"...\"}"
+
+# --- FIX: Simplified to generate ONE plain text English ad copy ---
 GPT_COPY_SYSTEM_PROMPT = """
-You are Feedly AI, an AI assistant that generates Korean Instagram ad copy for small F&B business owners. You will be given a strategy and a description. Your task is to generate THREE distinct Korean ad copy options.
-
-Strategy tones:
-  1. Hero Dish Focus — emphasize visual deliciousness & texture.
-  2. Seasonal / Limited — urgency + seasonal mood.
-  3. Behind-the-Scenes — sincerity, craftsmanship.
-  4. Lifestyle — cozy, everyday scene.
-  5. UGC / Social Proof — authentic, casual customer vibe.
-  6. Minimalist Branding — clean, premium, one short sentence.
-  7. Emotion / Comfort — warm, nostalgic.
-  8. Retro / Vintage — storytelling, old-days atmosphere.
-
-Rules:
-- Output ONLY Korean copy for each variant.
-- Each of the 3 variants must feel clearly different.
-- Do NOT include hashtags or emojis.
-- Output JSON ONLY, with this format:
-{
-  "variants": [
-    { "copy_en": "..." },
-    { "copy_en": "..." },
-    { "copy_en": "..." }
-  ]
-}
+You are Feedly AI, an AI assistant that generates Instagram ad copy. You will be given an English description.
+Your task is to generate ONE compelling English ad copy option based on one of the following strategies: Hero Dish Focus, Seasonal, Behind-the-Scenes, or Lifestyle.
+- Output ONLY the single ad copy text.
+- Do NOT include strategy names, hashtags, emojis, or any other text.
+- Do NOT use JSON.
 """
+
+# --- FIX: Simplified to generate ONE plain text Korean ad copy ---
 ENG_TO_KOR_TRANSLATION_PROMPT = """
-You are a professional marketing copy translator specializing in Instagram food ads. Translate each English ad copy variant into natural, appealing Korean. Preserve marketing tone. No hashtags. No emojis.
-Output JSON ONLY:
-{
-  "variants": [
-    {"copy_ko": "..."},
-    {"copy_ko": "..."},
-    {"copy_ko": "..."}
-  ]
-}
+You are a professional marketing copy translator specializing in Instagram food ads.
+Translate the given English ad copy into a single, natural, and appealing Korean sentence.
+- Output ONLY the translated Korean text.
+- Do NOT include hashtags, emojis, or any other text.
+- Do NOT use JSON.
 """
 
 # ============================
@@ -293,6 +282,13 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Feedly AI - 8 Strategy API", version="4.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
+# --- CORRECTED STATIC FILE MOUNTING ---
+# Serve the final assets from the /opt/feedlyai/assets directory.
+app.mount(ASSETS_URL_PREFIX, StaticFiles(directory=ASSETS_ROOT), name="assets")
+
+# This mount for /media can remain for temporary uploads if needed.
+app.mount("/media", StaticFiles(directory=MEDIA_ROOT), name="media")
+
 # Add exception handler for validation errors
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request, exc):
@@ -357,40 +353,58 @@ async def general_exception_handler(request, exc):
         content={"detail": f"Internal server error: {type(exc).__name__}: {str(exc)}"}
     )
 
-async def call_gpt(system_prompt: str, user_prompt: str, model_name: str = "gpt-4o-mini") -> Tuple[dict, dict]:
-    """Call GPT API and return (result, metadata) where metadata includes latency and token usage"""
+async def call_gpt(system_prompt: str, user_prompt: str, model_name: str = "gpt-4o-mini", expect_json: bool = False) -> Tuple[Any, dict]:
+    """
+    Call GPT API and return (result, metadata).
+    If expect_json is True, result is a dict.
+    If expect_json is False, result is a string.
+    """
     import time
     start_time = time.time()
     try:
+        request_params = {
+            "model": model_name,
+            "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+            "temperature": 0.7,
+        }
+        if expect_json:
+            request_params["response_format"] = {"type": "json_object"}
+
         resp = await asyncio.to_thread(
             client.chat.completions.create,
-            model=model_name,
-            response_format={"type": "json_object"},
-            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-            temperature=0.7,
+            **request_params
         )
         latency_ms = (time.time() - start_time) * 1000
         
-        # Extract token usage
+        raw_content = resp.choices[0].message.content
+        result = json.loads(raw_content) if expect_json else raw_content.strip()
+
         token_usage = {}
         if hasattr(resp, 'usage'):
             token_usage = {
-                "prompt_tokens": resp.usage.prompt_tokens if resp.usage else 0,
-                "completion_tokens": resp.usage.completion_tokens if resp.usage else 0,
-                "total_tokens": resp.usage.total_tokens if resp.usage else 0
+                "prompt_tokens": resp.usage.prompt_tokens,
+                "completion_tokens": resp.usage.completion_tokens,
+                "total_tokens": resp.usage.total_tokens
             }
         
-        result = json.loads(resp.choices[0].message.content)
         metadata = {
-            "latency_ms": latency_ms,
-            "token_usage": token_usage,
-            "model": model_name,
-            "request": {"system": system_prompt, "user": user_prompt},
-            "response": resp.choices[0].message.content
+            "latency_ms": latency_ms, "token_usage": token_usage, "model": model_name,
+            "request": {"system": system_prompt, "user": user_prompt}, "response": raw_content
         }
         return result, metadata
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"OpenAI API error: {e}")
+
+async def get_or_create_llm_model(db: AsyncSession, model_name: str, provider: str = "openai") -> LLMModel:
+    """Fetches an LLMModel by name or creates it if it doesn't exist."""
+    result = await db.execute(select(LLMModel).filter_by(model_name=model_name))
+    model = result.scalar_one_or_none()
+    if not model:
+        print(f"INFO: LLM model '{model_name}' not found, creating new entry.")
+        model = LLMModel(model_name=model_name, provider=provider, is_active='true')
+        db.add(model)
+        await db.flush()
+    return model
 
 # ============================
 # 🔗 API Endpoints
@@ -744,84 +758,50 @@ async def create_job(
 
 @app.post("/api/js/gpt/kor-to-eng")
 async def gpt_kor_to_eng(req: KorToEngRequest, db: AsyncSession = Depends(get_db)):
-    """한국어 설명을 영어로 변환"""
+    """(FIXED) Translates Korean description and updates job_inputs.desc_eng."""
     try:
         job_id = uuid.UUID(req.job_id)
+        model_name = "gpt-4o-mini"
+        llm_model = await get_or_create_llm_model(db, model_name)
         
-        # 1. job_inputs에서 desc_kor 조회
-        job_input = (await db.execute(select(JobInput).filter(JobInput.job_id == job_id))).scalar_one_or_none()
-        if not job_input:
-            raise HTTPException(status_code=404, detail="Job input not found")
-        if not job_input.desc_kor:
-            raise HTTPException(status_code=400, detail="Korean description is empty")
+        job_input_res = await db.execute(select(JobInput).filter(JobInput.job_id == job_id))
+        job_input = job_input_res.scalar_one_or_none()
+        if not job_input or not job_input.desc_kor:
+            raise HTTPException(status_code=404, detail="Job input with Korean description not found.")
         
-        # 2. GPT API 호출
-        gpt_result, metadata = await call_gpt(TRANSLATION_SYSTEM_PROMPT, job_input.desc_kor)
+        # This step still expects JSON, so expect_json=True
+        gpt_result, metadata = await call_gpt(TRANSLATION_SYSTEM_PROMPT, job_input.desc_kor, model_name=model_name, expect_json=True)
         desc_eng = gpt_result.get("translation_en", "Translation failed.")
         
-        # 3. llm_models에서 사용한 모델 조회 (선택적)
-        llm_model_id = None
-        try:
-            llm_model_result = await db.execute(
-                select(LLMModel)
-                .filter(LLMModel.provider == 'openai', LLMModel.model_name == metadata.get('model', 'gpt-4o-mini'), LLMModel.is_active == 'true')
-                .limit(1)
-            )
-            llm_model = llm_model_result.scalar_one_or_none()
-            if llm_model:
-                llm_model_id = llm_model.llm_model_id
-        except Exception as e:
-            print(f"Warning: Could not find LLM model: {e}")
-        
-        # 4. llm_traces에 기록
         llm_trace = LLMTrace(
-            job_id=job_id,
-            provider='gpt',
-            llm_model_id=llm_model_id,
-            operation_type='kor_to_eng',
-            request=metadata.get('request', {}),
-            response={"content": metadata.get('response', '')},
-            latency_ms=metadata.get('latency_ms', 0),
-            prompt_tokens=metadata.get('token_usage', {}).get('prompt_tokens'),
-            completion_tokens=metadata.get('token_usage', {}).get('completion_tokens'),
-            total_tokens=metadata.get('token_usage', {}).get('total_tokens'),
-            token_usage=metadata.get('token_usage', {})
+            job_id = job_id,
+            provider = 'openai', # Corrected provider name
+            llm_model_id = llm_model.llm_model_id, # FIX: Use the ID from the fetched model object
+            operation_type = 'kor_to_eng',
+            request = {"system": TRANSLATION_SYSTEM_PROMPT, "user": job_input.desc_kor},
+            response = {"content": desc_eng},
+            latency_ms = metadata.get('latency_ms', 0),
+            prompt_tokens = metadata.get('token_usage', {}).get('prompt_tokens'),
+            completion_tokens = metadata.get('token_usage', {}).get('completion_tokens'),
+            total_tokens = metadata.get('token_usage', {}).get('total_tokens'),
+            token_usage = metadata.get('token_usage', {})
         )
         db.add(llm_trace)
-        await db.flush()
         
-        # 5. txt_ad_copy_generations에 레코드 생성
-        ad_copy_gen = TxtAdCopyGeneration(
-            job_id=job_id,
-            llm_trace_id=llm_trace.llm_trace_id,
-            generation_stage='kor_to_eng',
-            ad_copy_eng=desc_eng,
-            status='done'
-        )
-        db.add(ad_copy_gen)
-        
-        # 6. job_inputs.desc_eng 업데이트
+        # 4. UPDATE the desc_eng field in the job_inputs table
         job_input.desc_eng = desc_eng
-
-        # # 7. jobs 테이블 업데이트
-        # job = await db.get(Job, job_id)
-        # if job:
-        #     job.current_step = 'kor_to_eng' # Use the operation_type for clarity
-        #     job.status = 'done' # The job is still running, not done
-        #     job.updated_at = datetime.utcnow()
+        job_input.updated_at = datetime.utcnow()
         
-        # ad_copy_gen.updated_at = datetime.utcnow()
-        # await db.commit()
+        # 5. Update job status to signal completion of this step
+        job = await db.get(Job, job_id)
+        if job:
+            job.current_step = 'kor_to_eng'
+            job.status = 'done'
+            job.updated_at = datetime.utcnow()
         
-        return {
-            "job_id": str(job_id),
-            "llm_trace_id": str(llm_trace.llm_trace_id),
-            "ad_copy_gen_id": str(ad_copy_gen.ad_copy_gen_id),
-            "desc_eng": desc_eng,
-            "status": "done"
-        }
-    except HTTPException:
-        raise
+        await db.commit()
+        
+        return {"job_id": str(job_id), "status": "done", "desc_eng": desc_eng}
     except Exception as e:
         print(f"ERROR in kor-to-eng: {type(e).__name__}: {e}")
         import traceback
@@ -830,186 +810,155 @@ async def gpt_kor_to_eng(req: KorToEngRequest, db: AsyncSession = Depends(get_db
 
 @app.post("/api/js/gpt/ad-copy-eng")
 async def gpt_ad_copy_eng(req: AdCopyEngRequest, db: AsyncSession = Depends(get_db)):
-    """영어 광고문구 생성"""
+    """(FIXED) Creates a single English ad copy and saves it to txt_ad_copy_generations."""
     job_id = uuid.UUID(req.job_id)
+    model_name = "gpt-4o-mini"
+    llm_model = await get_or_create_llm_model(db, model_name)
     
-    # 1. job_inputs에서 desc_eng, tone_style_id 조회
-    job_input = (await db.execute(select(JobInput).filter(JobInput.job_id == job_id))).scalar_one_or_none()
-    if not job_input:
-        raise HTTPException(status_code=404, detail="Job input not found")
-    if not job_input.desc_eng:
-        raise HTTPException(status_code=404, detail="English description not found. Run kor-to-eng first.")
+    job_input_res = await db.execute(select(JobInput).filter(JobInput.job_id == job_id))
+    job_input = job_input_res.scalar_one_or_none()
+    if not job_input or not job_input.desc_eng:
+        raise HTTPException(status_code=404, detail="English description not found in job_inputs. Run kor-to-eng first.")
     
-    # 2. tone_styles 조회 (선택적, 필요시 추가)
-    # tone_style_id가 있다면 조회 가능
+    # FIX: Call GPT expecting plain text (expect_json=False)
+    user_prompt = f"Description (English): {job_input.desc_eng}"
+    ad_copy_eng_text, metadata = await call_gpt(GPT_COPY_SYSTEM_PROMPT, user_prompt, model_name=model_name, expect_json=False)
     
-    # 3. GPT API 호출: 영어 광고문구 생성
-    user_prompt = f"Description (Korean): {job_input.desc_kor}\nDescription (English): {job_input.desc_eng}"
-    gpt_result, metadata = await call_gpt(GPT_COPY_SYSTEM_PROMPT, user_prompt)
-    ad_copy_eng_text = json.dumps(gpt_result.get("variants", []))  # JSON 문자열로 저장
-    
-    # 4. llm_models에서 사용한 모델 조회 (선택적)
-    llm_model = await db.execute(
-        select(LLMModel)
-        .filter(LLMModel.provider == 'openai', LLMModel.model_name == metadata['model'], LLMModel.is_active == 'true')
-        .limit(1)
-    )
-    llm_model_id = llm_model.scalar_one_or_none()
-    
-    # 5. llm_traces에 기록
+    # Create LLM trace
     llm_trace = LLMTrace(
-        job_id=job_id,
-        provider='gpt',
-        llm_model_id=llm_model_id.llm_model_id if llm_model_id else None,
-        operation_type='ad_copy_gen',
-        request=metadata['request'],
-        response={"content": metadata['response']},
-        latency_ms=metadata['latency_ms'],
-        prompt_tokens=metadata['token_usage'].get('prompt_tokens'),
-        completion_tokens=metadata['token_usage'].get('completion_tokens'),
-        total_tokens=metadata['token_usage'].get('total_tokens'),
-        token_usage=metadata['token_usage']
+        job_id = job_id,
+        provider = 'openai', # Corrected provider name
+        llm_model_id = llm_model.llm_model_id, # FIX: Use the ID from the fetched model object
+        operation_type = 'ad_copy_gen',
+        request = metadata['request'],
+        response = {"content": metadata['response']},
+        latency_ms = metadata['latency_ms'],
+        prompt_tokens = metadata['token_usage'].get('prompt_tokens'),
+        completion_tokens = metadata['token_usage'].get('completion_tokens'),
+        total_tokens = metadata['token_usage'].get('total_tokens'),
+        token_usage = metadata['token_usage']
     )
     db.add(llm_trace)
     await db.flush()
     
-    # 6. txt_ad_copy_generations에 레코드 생성/업데이트
-    ad_copy_gen = TxtAdCopyGeneration(
-        job_id=job_id,
-        llm_trace_id=llm_trace.llm_trace_id,
-        generation_stage='ad_copy_eng',
-        ad_copy_eng=ad_copy_eng_text,
-        status='done'
-    )
-    db.add(ad_copy_gen)
+    # UPSERT logic for txt_ad_copy_generations
+    gen_res = await db.execute(select(TxtAdCopyGeneration).filter_by(job_id=job_id, generation_stage='ad_copy_eng'))
+    ad_copy_gen = gen_res.scalar_one_or_none()
     
-    # # 7. jobs 테이블 업데이트
-    # job = await db.get(Job, job_id)
-    # if job:
-    #     job.current_step = 'ad_copy_eng' # Use the operation_type for clarity
-    #     job.status = 'done' # The job is still running
-    #     job.updated_at = datetime.utcnow()
+    if ad_copy_gen:
+        ad_copy_gen.llm_trace_id = llm_trace.llm_trace_id
+        ad_copy_gen.ad_copy_eng = ad_copy_eng_text # FIX: Save plain text directly
+        ad_copy_gen.status = 'done'
+        ad_copy_gen.updated_at = datetime.utcnow()
+    else:
+        ad_copy_gen = TxtAdCopyGeneration(
+            job_id=job_id, llm_trace_id=llm_trace.llm_trace_id,
+            generation_stage='ad_copy_eng', ad_copy_eng=ad_copy_eng_text, status='done' # FIX: Save plain text directly
+        )
+        db.add(ad_copy_gen)
+        
+    # Update job status
+    job = await db.get(Job, job_id)
+    if job:
+        job.current_step = 'ad_copy_eng'
+        job.status = 'done'
+        job.updated_at = datetime.utcnow()
+        
+    await db.commit()
     
-    # ad_copy_gen.updated_at = datetime.utcnow()
-    # await db.commit()
-    
-    return {
-        "job_id": str(job_id),
-        "llm_trace_id": str(llm_trace.llm_trace_id),
-        "ad_copy_gen_id": str(ad_copy_gen.ad_copy_gen_id),
-        "ad_copy_eng": ad_copy_eng_text,
-        "status": "done"
-    }
+    return {"job_id": str(job_id), "status": "done"}
 
 @app.post("/api/js/gpt/ad-copy-kor")
 async def gpt_ad_copy_kor(req: AdCopyKorRequest, db: AsyncSession = Depends(get_db)):
-    """한글 광고문구 생성 (오버레이에 사용)"""
+    """(FIXED) Creates a single Korean ad copy and saves it to txt_ad_copy_generations."""
     job_id = uuid.UUID(req.job_id)
+    model_name = "gpt-4o-mini"
+    llm_model = await get_or_create_llm_model(db, model_name)
     
-    # 1. txt_ad_copy_generations에서 ad_copy_eng 조회 (generation_stage='ad_copy_eng')
-    eng_gen_result = await db.execute(
-        select(TxtAdCopyGeneration)
-        .filter(
-            TxtAdCopyGeneration.job_id == job_id,
-            TxtAdCopyGeneration.generation_stage == 'ad_copy_eng'
-        )
-        .order_by(TxtAdCopyGeneration.created_at.desc())
-    )
-    eng_gen = eng_gen_result.scalars().first()
+    eng_gen_res = await db.execute(select(TxtAdCopyGeneration).filter_by(job_id=job_id, generation_stage='ad_copy_eng'))
+    eng_gen = eng_gen_res.scalar_one_or_none()
     if not eng_gen or not eng_gen.ad_copy_eng:
         raise HTTPException(status_code=404, detail="English ad copy not found. Run ad-copy-eng first.")
     
-    # 2. GPT API 호출: 영어 광고문구 → 한글 광고문구 변환
-    gpt_result, metadata = await call_gpt(ENG_TO_KOR_TRANSLATION_PROMPT, eng_gen.ad_copy_eng)
-    variants_ko = gpt_result.get("variants", [])
-    if not variants_ko:
-        raise HTTPException(status_code=500, detail="Translation failed.")
+    # FIX: Call GPT expecting plain text (expect_json=False)
+    ad_copy_kor_text, metadata = await call_gpt(ENG_TO_KOR_TRANSLATION_PROMPT, eng_gen.ad_copy_eng, model_name=model_name, expect_json=False)
     
-    # 한글 광고문구를 텍스트로 변환 (첫 번째 variant의 copy_ko 사용 또는 전체 JSON)
-    ad_copy_kor_text = json.dumps(variants_ko) if isinstance(variants_ko, list) else str(variants_ko)
-    
-    # 3. llm_models에서 사용한 모델 조회 (선택적)
-    llm_model = await db.execute(
-        select(LLMModel)
-        .filter(LLMModel.provider == 'openai', LLMModel.model_name == metadata['model'], LLMModel.is_active == 'true')
-        .limit(1)
-    )
-    llm_model_id = llm_model.scalar_one_or_none()
-    
-    # 4. llm_traces에 기록
+    # Create LLM trace
     llm_trace = LLMTrace(
-        job_id=job_id,
-        provider='gpt',
-        llm_model_id=llm_model_id.llm_model_id if llm_model_id else None,
-        operation_type='ad_copy_kor',
-        request=metadata['request'],
-        response={"content": metadata['response']},
-        latency_ms=metadata['latency_ms'],
-        prompt_tokens=metadata['token_usage'].get('prompt_tokens'),
-        completion_tokens=metadata['token_usage'].get('completion_tokens'),
-        total_tokens=metadata['token_usage'].get('total_tokens'),
-        token_usage=metadata['token_usage']
+        job_id = job_id,
+        provider = 'openai', # Corrected provider name
+        llm_model_id = llm_model.llm_model_id, # FIX: Use the ID from the fetched model object
+        operation_type = 'ad_copy_kor',
+        request = metadata['request'],
+        response = {"content": metadata['response']},
+        latency_ms = metadata['latency_ms'],
+        prompt_tokens = metadata['token_usage'].get('prompt_tokens'),
+        completion_tokens = metadata['token_usage'].get('completion_tokens'),
+        total_tokens = metadata['token_usage'].get('total_tokens'),
+        token_usage = metadata['token_usage']
     )
     db.add(llm_trace)
     await db.flush()
     
-    # 5. txt_ad_copy_generations에 레코드 생성
-    ko_record = TxtAdCopyGeneration(
-        job_id=job_id,
-        llm_trace_id=llm_trace.llm_trace_id,
-        generation_stage='ad_copy_kor',
-        ad_copy_kor=ad_copy_kor_text,
-        status='done'
-    )
-    db.add(ko_record)
+    # UPSERT logic for txt_ad_copy_generations
+    gen_res = await db.execute(select(TxtAdCopyGeneration).filter_by(job_id=job_id, generation_stage='ad_copy_kor'))
+    ko_record = gen_res.scalar_one_or_none()
+
+    if ko_record:
+        ko_record.llm_trace_id = llm_trace.llm_trace_id
+        ko_record.ad_copy_kor = ad_copy_kor_text # FIX: Save plain text directly
+        ko_record.status = 'done'
+        ko_record.updated_at = datetime.utcnow()
+    else:
+        ko_record = TxtAdCopyGeneration(
+            job_id=job_id, llm_trace_id=llm_trace.llm_trace_id,
+            generation_stage='ad_copy_kor', ad_copy_kor=ad_copy_kor_text, status='done' # FIX: Save plain text directly
+        )
+        db.add(ko_record)
+        
+    # Update job status (final step)
+    job = await db.get(Job, job_id)
+    if job:
+        # FIX: Set current_step to 'user_img_input' as requested at the end of the pipeline.
+        job.current_step = 'user_img_input' 
+        job.status = 'done'
+        job.updated_at = datetime.utcnow()
+        
+    await db.commit()
     
-    # # 6. jobs 테이블 업데이트
-    # job = await db.get(Job, job_id)
-    # if job:
-    #     job.current_step = 'ad_copy_kor' # Use the operation_type for clarity
-    #     job.status = 'done' # This is the final step of the JS pipeline
-    #     job.updated_at = datetime.utcnow()
-    
-    # ko_record.updated_at = datetime.utcnow()
-    # await db.commit()
-    
-    return {
-        "job_id": str(job_id),
-        "llm_trace_id": str(llm_trace.llm_trace_id),
-        "ad_copy_gen_id": str(ko_record.ad_copy_gen_id),
-        "ad_copy_kor": ad_copy_kor_text,
-        "status": "done"
-    }
+    return {"job_id": str(job_id), "status": "done"}
 
 # --- CORRECTED /results endpoint ---
 @app.get("/api/v1/jobs/{job_id}/results", response_model=JobResult)
 async def get_job_results(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    # 1. Fetch 3 overlaid images using the correct column: overlaid_img_asset_id
-    # Added ORDER BY to ensure consistent ordering
+    # 1. Fetch relative image paths from the database
     image_query = (
         select(ImageAsset.image_url)
         .join(JobVariant, JobVariant.overlaid_img_asset_id == ImageAsset.image_asset_id)
         .where(JobVariant.job_id == job_id)
-        .order_by(JobVariant.creation_order)  # Order by creation_order for consistent results
+        .order_by(JobVariant.creation_order)
         .limit(3)
     )
     image_result = await db.execute(image_query)
-    images = [{"image_url": row[0]} for row in image_result.fetchall()]
+    # The database stores the correct URL path, e.g., "/assets/yh/tenants/..."
+    image_paths = [row[0] for row in image_result.fetchall()]
     
-    # Debug logging
+    # 2. Use the paths directly from the database.
+    # FIX: Do NOT prepend ASSETS_URL_PREFIX. The path from the DB is already correct.
+    images = [{"image_url": path} for path in image_paths]
+    
     print(f"DEBUG: get_job_results for job_id={job_id}")
-    print(f"DEBUG: Found {len(images)} images")
+    print(f"DEBUG: Found {len(images)} images. Returning URLs like: {images[0]['image_url'] if images else 'N/A'}")
 
-    # 2. Fetch ad copy and hashtags from instagram_feeds table
+    # 3. Fetch ad copy and hashtags from instagram_feeds table
     feed_query = select(InstagramFeed.instagram_ad_copy, InstagramFeed.hashtags).where(InstagramFeed.job_id == job_id).limit(1)
     feed_result = await db.execute(feed_query)
     feed_data = feed_result.first()
 
     if not images and not feed_data:
-        # More detailed error message
         raise HTTPException(
             status_code=404, 
-            detail=f"No results found for job ID {job_id}. Check if JobVariant records exist and have overlaid_img_asset_id set."
+            detail=f"No results found for job ID {job_id}."
         )
 
     return {

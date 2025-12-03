@@ -1,75 +1,78 @@
-import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, ActivityIndicator, ScrollView, Image, Alert, Dimensions } from 'react-native';
-import { getJobResults } from '../api/feedlyApi';
-import { commonStyles as cs } from './_styles';
+import React, { useEffect, useState } from "react";
+import { View, Text, StyleSheet, ActivityIndicator, ScrollView, Image, Dimensions } from "react-native"; // Add Image and Dimensions
+import { getJobResults } from "../api/feedlyApi";
+import { commonStyles as cs } from "./_styles";
 
-const { width } = Dimensions.get('window');
+// The base URL of your FastAPI server
+const API_BASE_URL = 'http://34.9.178.28:8012'; 
+const screenWidth = Dimensions.get('window').width;
 
-export default function ResultsScreen({ route, navigation }) {
+export default function ResultsScreen({ route }) {
   const { jobId } = route.params;
-  const [loading, setLoading] = useState(true);
   const [results, setResults] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
 
   useEffect(() => {
-    if (!jobId) {
-      Alert.alert("오류", "Job ID가 없습니다.", [{ text: "OK", onPress: () => navigation.goBack() }]);
-      return;
-    }
-
     const fetchResults = async () => {
       try {
+        setLoading(true);
         const data = await getJobResults(jobId);
         setResults(data);
-      } catch (error) {
-        Alert.alert("결과 로딩 실패", error.message, [{ text: "OK", onPress: () => navigation.goBack() }]);
+        setError(null);
+      } catch (e) {
+        console.error("Failed to fetch results:", e);
+        setError("결과를 불러오는 데 실패했습니다.");
       } finally {
         setLoading(false);
       }
     };
-
     fetchResults();
   }, [jobId]);
 
   if (loading) {
-    return (
-      <View style={[cs.container, styles.center]}>
-        <ActivityIndicator size="large" color="#4f46e5" />
-        <Text style={styles.loadingText}>결과를 불러오는 중...</Text>
-      </View>
-    );
+    return <View style={cs.container}><ActivityIndicator size="large" /></View>;
   }
-
+  if (error) {
+    return <View style={cs.container}><Text style={cs.text}>{error}</Text></View>;
+  }
   if (!results) {
-    return (
-      <View style={[cs.container, styles.center]}>
-        <Text>결과를 찾을 수 없습니다.</Text>
-      </View>
-    );
+    return <View style={cs.container}><Text style={cs.text}>결과가 없습니다.</Text></View>;
   }
 
   return (
-    <ScrollView style={cs.container}>
-      <View style={styles.header}>
-        <Text style={styles.title}>생성된 광고 시안</Text>
-      </View>
+    <ScrollView style={cs.container} contentContainerStyle={styles.contentContainer}>
+      <Text style={styles.header}>생성된 광고 시안</Text>
 
-      {/* Image Carousel/List */}
+      {/* Image Carousel Section */}
       <ScrollView horizontal pagingEnabled showsHorizontalScrollIndicator={false} style={styles.carousel}>
-        {results.images.map((img, index) => (
-          <Image key={index} source={{ uri: img.image_url }} style={styles.image} resizeMode="cover" />
-        ))}
+        {results.images && results.images.map((img, index) => {
+          // FIX: Use the full URL path provided by the API directly.
+          // The API now returns the correct path like "/assets/yh/tenants/...".
+          // The api.js layer will prepend the base URL (http://34.9.178.28:8012).
+          const imageUrl = `${API_BASE_URL}${img.image_url}`;
+          console.log(`Rendering image URL: ${imageUrl}`); // Debug log
+          return (
+            <View key={index} style={styles.imageContainer}>
+              <Image
+                source={{ uri: imageUrl }}
+                style={styles.image}
+                resizeMode="cover"
+              />
+            </View>
+          );
+        })}
       </ScrollView>
 
       {/* Ad Copy Section */}
       <View style={styles.card}>
-        <Text style={styles.cardTitle}>광고 문구</Text>
-        {/* ENSURE this uses 'instagram_ad_copy' to match the backend fix */}
+        <Text style={styles.cardTitle}>인스타 피드글</Text>
         <Text style={styles.cardContent}>{results.instagram_ad_copy}</Text>
       </View>
 
       {/* Hashtags Section */}
       <View style={styles.card}>
-        <Text style={styles.cardTitle}>해시태그</Text>
+        <Text style={styles.cardTitle}>추천 해시태그</Text>
         <Text style={styles.cardContent}>{results.hashtags}</Text>
       </View>
     </ScrollView>
@@ -77,24 +80,42 @@ export default function ResultsScreen({ route, navigation }) {
 }
 
 const styles = StyleSheet.create({
-  center: { justifyContent: 'center', alignItems: 'center' },
-  loadingText: { marginTop: 10, fontSize: 16, color: '#6b7280' },
-  header: { padding: 20 },
-  title: { fontSize: 24, fontWeight: 'bold' },
-  carousel: { height: width }, // Makes carousel square
-  image: { width: width, height: width },
-  card: {
-    backgroundColor: 'white',
-    borderRadius: 8,
+  contentContainer: {
     padding: 16,
-    marginHorizontal: 20,
-    marginTop: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.22,
-    shadowRadius: 2.22,
-    elevation: 3,
   },
-  cardTitle: { fontSize: 18, fontWeight: 'bold', marginBottom: 8 },
-  cardContent: { fontSize: 16, lineHeight: 24, color: '#374151' },
+  header: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    marginBottom: 16,
+  },
+  carousel: {
+    marginBottom: 24,
+  },
+  imageContainer: {
+    width: screenWidth - 32, // Full width with padding
+    height: screenWidth - 32, // Make it square
+    borderRadius: 12,
+    overflow: 'hidden',
+    marginRight: 16, // Space between images if you remove pagingEnabled
+  },
+  image: {
+    width: '100%',
+    height: '100%',
+  },
+  card: {
+    backgroundColor: '#f8f9fa',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+  },
+  cardTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    marginBottom: 8,
+  },
+  cardContent: {
+    fontSize: 16,
+    lineHeight: 24,
+    color: '#495057',
+  },
 });

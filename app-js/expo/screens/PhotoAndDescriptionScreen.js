@@ -2,7 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { View, Text, TouchableOpacity, Image, TextInput, StyleSheet, Alert, ScrollView, ActivityIndicator, Linking, KeyboardAvoidingView, Platform } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { commonStyles as cs } from './_styles';
-import { createGenerationJob, gptKorToEng, gptAdCopyEng, gptAdCopyKor } from '../api/feedlyApi'; // <--- Import the NEW function
+import { createGenerationJob, gptKorToEng, gptAdCopyEng, gptAdCopyKor } from '../api/feedlyApi'; 
 import { STRATEGIES } from '../constants/strategies';
 
 export default function PhotoAndDescriptionScreen({ route, navigation }) {
@@ -47,6 +47,10 @@ export default function PhotoAndDescriptionScreen({ route, navigation }) {
   };
 
   const handleGenerate = async () => {
+    if (!imageUri) {
+      Alert.alert("입력 필요", "광고에 사용할 이미지를 업로드해 주세요.");
+      return;
+    }
     if (!description.trim()) {
       Alert.alert("입력 필요", "광고에 대한 설명을 입력해 주세요.");
       return;
@@ -55,26 +59,38 @@ export default function PhotoAndDescriptionScreen({ route, navigation }) {
     setIsLoading(true);
 
     try {
-      //console.log("--- Starting Generation Job ---");
+      console.log("--- Starting Generation Job ---");
     
-      // 1. Call the NEW API endpoint
+      // 1. Create the initial job record and upload the image.
       const result = await createGenerationJob(imageUri, description);
+      const jobId = result.job_id;
+      console.log(`Job created with ID: ${jobId}`);
       
-      gptKorToEng(result.job_id)
-      gptAdCopyEng(result.job_id)
-      gptAdCopyKor(result.job_id)
+      // --- FIX: Await each step in the pipeline sequentially ---
+      
+      // 2. Run Korean to English translation and wait for it to complete.
+      console.log("Step 1: Translating to English...");
+      await gptKorToEng(jobId);
+      console.log("Step 1: Complete.");
 
-      // console.log("--- Job Started Successfully ---", result);
+      // 3. Generate English ad copy and wait for it to complete.
+      console.log("Step 2: Generating English ad copy...");
+      await gptAdCopyEng(jobId);
+      console.log("Step 2: Complete.");
+
+      // 4. Generate Korean ad copy and wait for it to complete.
+      console.log("Step 3: Generating Korean ad copy...");
+      await gptAdCopyKor(jobId);
+      console.log("Step 3: Complete.");
+
+      console.log("--- All generation steps successful ---");
       
-      // 2. Navigate to the next screen (or show success)
-      // For now, we just alert the Job ID. Later we will navigate to a 'Generating' screen.
-      // Alert.alert("Success", `Job Started! ID: ${result.job_id}`);
-      
-      navigation.navigate('GeneratingScreen', { jobId: result.job_id });
+      // 5. Navigate to the results screen.
+      navigation.navigate('GeneratingScreen', { jobId: jobId });
 
     } catch (error) {
-      console.error("Generation failed:", error);
-      Alert.alert("Error", "Failed to start generation. Check console for details.");
+      console.error("Generation pipeline failed:", error);
+      Alert.alert("생성 실패", "광고 생성 중 오류가 발생했습니다. 다시 시도해 주세요.");
     } finally {
       setIsLoading(false);
     }
