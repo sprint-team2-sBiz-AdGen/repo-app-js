@@ -1,5 +1,5 @@
 # updated at: 2025-12-02
-# version: 1.6.0
+# version: 1.7.0
 
 import os
 import uuid
@@ -251,7 +251,7 @@ class JobVariant(Base):
 
 class InstagramFeed(Base):
     __tablename__ = 'instagram_feeds'
-    insta_feed_id = Column(UUID(as_uuid=True), primary_key=True)
+    instagram_feed_id = Column('instagram_feed_id', UUID(as_uuid=True), primary_key=True)
     job_id = Column(UUID(as_uuid=True), ForeignKey('jobs.job_id'))
     overlay_id = Column(UUID(as_uuid=True), nullable=True)
     tenant_id = Column(String, nullable=True)
@@ -803,15 +803,15 @@ async def gpt_kor_to_eng(req: KorToEngRequest, db: AsyncSession = Depends(get_db
         # 6. job_inputs.desc_eng 업데이트
         job_input.desc_eng = desc_eng
 
-        # 7. jobs 테이블 업데이트
-        job = await db.get(Job, job_id)
-        if job:
-            job.current_step = 'kor_to_eng' # Use the operation_type for clarity
-            job.status = 'done' # The job is still running, not done
-            job.updated_at = datetime.utcnow()
+        # # 7. jobs 테이블 업데이트
+        # job = await db.get(Job, job_id)
+        # if job:
+        #     job.current_step = 'kor_to_eng' # Use the operation_type for clarity
+        #     job.status = 'done' # The job is still running, not done
+        #     job.updated_at = datetime.utcnow()
         
-        ad_copy_gen.updated_at = datetime.utcnow()
-        await db.commit()
+        # ad_copy_gen.updated_at = datetime.utcnow()
+        # await db.commit()
         
         return {
             "job_id": str(job_id),
@@ -883,15 +883,15 @@ async def gpt_ad_copy_eng(req: AdCopyEngRequest, db: AsyncSession = Depends(get_
     )
     db.add(ad_copy_gen)
     
-    # 7. jobs 테이블 업데이트
-    job = await db.get(Job, job_id)
-    if job:
-        job.current_step = 'ad_copy_eng' # Use the operation_type for clarity
-        job.status = 'done' # The job is still running
-        job.updated_at = datetime.utcnow()
+    # # 7. jobs 테이블 업데이트
+    # job = await db.get(Job, job_id)
+    # if job:
+    #     job.current_step = 'ad_copy_eng' # Use the operation_type for clarity
+    #     job.status = 'done' # The job is still running
+    #     job.updated_at = datetime.utcnow()
     
-    ad_copy_gen.updated_at = datetime.utcnow()
-    await db.commit()
+    # ad_copy_gen.updated_at = datetime.utcnow()
+    # await db.commit()
     
     return {
         "job_id": str(job_id),
@@ -963,15 +963,15 @@ async def gpt_ad_copy_kor(req: AdCopyKorRequest, db: AsyncSession = Depends(get_
     )
     db.add(ko_record)
     
-    # 6. jobs 테이블 업데이트
-    job = await db.get(Job, job_id)
-    if job:
-        job.current_step = 'ad_copy_kor' # Use the operation_type for clarity
-        job.status = 'done' # This is the final step of the JS pipeline
-        job.updated_at = datetime.utcnow()
+    # # 6. jobs 테이블 업데이트
+    # job = await db.get(Job, job_id)
+    # if job:
+    #     job.current_step = 'ad_copy_kor' # Use the operation_type for clarity
+    #     job.status = 'done' # This is the final step of the JS pipeline
+    #     job.updated_at = datetime.utcnow()
     
-    ko_record.updated_at = datetime.utcnow()
-    await db.commit()
+    # ko_record.updated_at = datetime.utcnow()
+    # await db.commit()
     
     return {
         "job_id": str(job_id),
@@ -985,14 +985,20 @@ async def gpt_ad_copy_kor(req: AdCopyKorRequest, db: AsyncSession = Depends(get_
 @app.get("/api/v1/jobs/{job_id}/results", response_model=JobResult)
 async def get_job_results(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     # 1. Fetch 3 overlaid images using the correct column: overlaid_img_asset_id
+    # Added ORDER BY to ensure consistent ordering
     image_query = (
         select(ImageAsset.image_url)
         .join(JobVariant, JobVariant.overlaid_img_asset_id == ImageAsset.image_asset_id)
         .where(JobVariant.job_id == job_id)
+        .order_by(JobVariant.creation_order)  # Order by creation_order for consistent results
         .limit(3)
     )
     image_result = await db.execute(image_query)
     images = [{"image_url": row[0]} for row in image_result.fetchall()]
+    
+    # Debug logging
+    print(f"DEBUG: get_job_results for job_id={job_id}")
+    print(f"DEBUG: Found {len(images)} images")
 
     # 2. Fetch ad copy and hashtags from instagram_feeds table
     feed_query = select(InstagramFeed.instagram_ad_copy, InstagramFeed.hashtags).where(InstagramFeed.job_id == job_id).limit(1)
@@ -1000,10 +1006,73 @@ async def get_job_results(job_id: uuid.UUID, db: AsyncSession = Depends(get_db))
     feed_data = feed_result.first()
 
     if not images and not feed_data:
-        raise HTTPException(status_code=404, detail="No results found for this job ID.")
+        # More detailed error message
+        raise HTTPException(
+            status_code=404, 
+            detail=f"No results found for job ID {job_id}. Check if JobVariant records exist and have overlaid_img_asset_id set."
+        )
 
     return {
         "images": images,
         "instagram_ad_copy": feed_data.instagram_ad_copy if feed_data else "피드글을 생성하지 못했습니다.",
         "hashtags": feed_data.hashtags if feed_data else "#오류"
+    }
+
+# --- DEBUG endpoint to check job variants and images ---
+@app.get("/api/v1/jobs/{job_id}/debug")
+async def debug_job_results(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """Debug endpoint to check job variants and image associations"""
+    # 1. Check all JobVariant records
+    variant_query = select(JobVariant).where(JobVariant.job_id == job_id).order_by(JobVariant.creation_order)
+    variant_result = await db.execute(variant_query)
+    variants = variant_result.scalars().all()
+    
+    variants_data = []
+    for v in variants:
+        variants_data.append({
+            "job_variants_id": str(v.job_variants_id),
+            "img_asset_id": str(v.img_asset_id) if v.img_asset_id else None,
+            "overlaid_img_asset_id": str(v.overlaid_img_asset_id) if v.overlaid_img_asset_id else None,
+            "creation_order": v.creation_order,
+            "status": v.status
+        })
+    
+    # 2. Check images from the query (same as results endpoint)
+    image_query = (
+        select(ImageAsset.image_asset_id, ImageAsset.image_url, JobVariant.creation_order)
+        .join(JobVariant, JobVariant.overlaid_img_asset_id == ImageAsset.image_asset_id)
+        .where(JobVariant.job_id == job_id)
+        .order_by(JobVariant.creation_order)
+        .limit(3)
+    )
+    image_result = await db.execute(image_query)
+    image_rows = image_result.fetchall()
+    
+    images_data = []
+    for img_id, img_url, order in image_rows:
+        images_data.append({
+            "image_asset_id": str(img_id),
+            "image_url": img_url,
+            "creation_order": order
+        })
+    
+    # 3. Check Instagram feed data
+    feed_query = select(InstagramFeed).where(InstagramFeed.job_id == job_id).limit(1)
+    feed_result = await db.execute(feed_query)
+    feed_data = feed_result.scalar_one_or_none()
+    
+    feed_info = None
+    if feed_data:
+        feed_info = {
+            "instagram_ad_copy": feed_data.instagram_ad_copy,
+            "hashtags": feed_data.hashtags
+        }
+    
+    return {
+        "job_id": str(job_id),
+        "variants_count": len(variants),
+        "variants": variants_data,
+        "images_from_query_count": len(images_data),
+        "images_from_query": images_data,
+        "feed_data": feed_info
     }
