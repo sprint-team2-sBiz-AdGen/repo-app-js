@@ -236,7 +236,7 @@ LIMIT 1
    ```
 6. `jobs` 테이블 업데이트:
    ```sql
-   UPDATE jobs
+   UPDATE jobs -> llm trace
    SET current_step = 'ad_copy_gen_eng',
        status = 'done',
        updated_at = CURRENT_TIMESTAMP
@@ -303,7 +303,7 @@ LIMIT 1
    ```
 5. `jobs` 테이블 업데이트:
    ```sql
-   UPDATE jobs
+   UPDATE jobs -> llm trance
    SET current_step = 'ad_copy_gen_kor',
        status = 'done',
        updated_at = CURRENT_TIMESTAMP

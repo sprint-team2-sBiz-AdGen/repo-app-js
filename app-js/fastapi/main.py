@@ -15,7 +15,9 @@ from typing import List, Any, Optional, Tuple
 
 from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import List, Optional
+
 from openai import OpenAI
 
 # --- Use Async SQLAlchemy components ---
@@ -66,9 +68,9 @@ Rules:
 - Output JSON ONLY, with this format:
 {
   "variants": [
-    { "copy_ko": "..." },
-    { "copy_ko": "..." },
-    { "copy_ko": "..." }
+    { "copy_en": "..." },
+    { "copy_en": "..." },
+    { "copy_en": "..." }
   ]
 }
 """
@@ -232,6 +234,49 @@ class AdCopyEngRequest(BaseModel):
 class AdCopyKorRequest(BaseModel):
     job_id: str
     tenant_id: Optional[str] = None
+
+# --- DEFINITIVE FIX for ORM models ---
+class JobVariant(Base):
+    __tablename__ = 'jobs_variants'
+    job_variants_id = Column('job_variants_id', UUID(as_uuid=True), primary_key=True)
+    job_id = Column(UUID(as_uuid=True), ForeignKey('jobs.job_id'))
+    img_asset_id = Column(UUID(as_uuid=True), ForeignKey('image_assets.image_asset_id'))
+    overlaid_img_asset_id = Column(UUID(as_uuid=True), ForeignKey('image_assets.image_asset_id'), nullable=True)
+    creation_order = Column(Integer)
+    status = Column(String)
+    current_step = Column(String)
+    retry_count = Column(Integer)
+    selected = Column(Boolean)
+    overlaid_image = relationship("ImageAsset", foreign_keys=[overlaid_img_asset_id])
+
+class InstagramFeed(Base):
+    __tablename__ = 'instagram_feeds'
+    insta_feed_id = Column(UUID(as_uuid=True), primary_key=True)
+    job_id = Column(UUID(as_uuid=True), ForeignKey('jobs.job_id'))
+    overlay_id = Column(UUID(as_uuid=True), nullable=True)
+    tenant_id = Column(String, nullable=True)
+    refined_ad_copy_eng = Column(Text, nullable=True)
+    tone_style = Column(String, nullable=True)
+    product_description = Column(Text, nullable=True)
+    gpt_prompt = Column(Text, nullable=True)
+    instagram_ad_copy = Column(Text)
+    hashtags = Column(Text, nullable=True)
+    latency_ms = Column(Float, nullable=True)
+    used_temperature = Column(Float, nullable=True)
+    used_max_tokens = Column(Integer, nullable=True)
+    llm_trace_id = Column(UUID(as_uuid=True), nullable=True)
+    ad_copy_kor = Column(Text, nullable=True)
+
+# --- Pydantic response models ---
+class JobResultImage(BaseModel):
+    image_url: str
+    class Config:
+        from_attributes = True
+
+class JobResult(BaseModel):
+    images: List[JobResultImage]
+    instagram_ad_copy: Optional[str] = None
+    hashtags: Optional[str] = None
 
 # ============================
 # 🚀 FastAPI App & Helpers
@@ -670,14 +715,15 @@ async def create_job(
         creator_id=creator_id
     )
     new_job = Job(
-        status='running',
+        # The job is first created with this state
+        status='done',
         current_step='job_created',
         tenant_id=tenant_id,
         store_id=store_id_uuid  # Use the store_id we found or created
     )
 
     db.add_all([new_image, new_job])
-    await db.flush()
+    await db.flush() # Flush to get IDs for the next objects
 
     new_input = JobInput(
         job_id=new_job.job_id,
@@ -686,8 +732,15 @@ async def create_job(
         desc_kor=description_text  # use parsed description
     )
     db.add(new_input)
+
+    # Immediately update the job to its next state before committing.
+    # This is the final signal to the listener.
+    new_job.current_step = 'user_img_input'
+    new_job.status = 'done' 
+    new_job.updated_at = datetime.utcnow()
+    
     await db.commit()
-    return {"job_id": str(new_job.job_id), "status": "job_created"}
+    return {"job_id": str(new_job.job_id), "status": "job_created_and_inputs_submitted"}
 
 @app.post("/api/js/gpt/kor-to-eng")
 async def gpt_kor_to_eng(req: KorToEngRequest, db: AsyncSession = Depends(get_db)):
@@ -749,12 +802,12 @@ async def gpt_kor_to_eng(req: KorToEngRequest, db: AsyncSession = Depends(get_db
         
         # 6. job_inputs.desc_eng 업데이트
         job_input.desc_eng = desc_eng
-        
+
         # 7. jobs 테이블 업데이트
         job = await db.get(Job, job_id)
         if job:
-            job.current_step = 'desc_kor_translate'
-            job.status = 'done'
+            job.current_step = 'kor_to_eng' # Use the operation_type for clarity
+            job.status = 'done' # The job is still running, not done
             job.updated_at = datetime.utcnow()
         
         ad_copy_gen.updated_at = datetime.utcnow()
@@ -833,8 +886,8 @@ async def gpt_ad_copy_eng(req: AdCopyEngRequest, db: AsyncSession = Depends(get_
     # 7. jobs 테이블 업데이트
     job = await db.get(Job, job_id)
     if job:
-        job.current_step = 'ad_copy_gen_eng'
-        job.status = 'done'
+        job.current_step = 'ad_copy_eng' # Use the operation_type for clarity
+        job.status = 'done' # The job is still running
         job.updated_at = datetime.utcnow()
     
     ad_copy_gen.updated_at = datetime.utcnow()
@@ -913,8 +966,8 @@ async def gpt_ad_copy_kor(req: AdCopyKorRequest, db: AsyncSession = Depends(get_
     # 6. jobs 테이블 업데이트
     job = await db.get(Job, job_id)
     if job:
-        job.current_step = 'ad_copy_gen_kor'
-        job.status = 'done'
+        job.current_step = 'ad_copy_kor' # Use the operation_type for clarity
+        job.status = 'done' # This is the final step of the JS pipeline
         job.updated_at = datetime.utcnow()
     
     ko_record.updated_at = datetime.utcnow()
@@ -926,4 +979,31 @@ async def gpt_ad_copy_kor(req: AdCopyKorRequest, db: AsyncSession = Depends(get_
         "ad_copy_gen_id": str(ko_record.ad_copy_gen_id),
         "ad_copy_kor": ad_copy_kor_text,
         "status": "done"
+    }
+
+# --- CORRECTED /results endpoint ---
+@app.get("/api/v1/jobs/{job_id}/results", response_model=JobResult)
+async def get_job_results(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    # 1. Fetch 3 overlaid images using the correct column: overlaid_img_asset_id
+    image_query = (
+        select(ImageAsset.image_url)
+        .join(JobVariant, JobVariant.overlaid_img_asset_id == ImageAsset.image_asset_id)
+        .where(JobVariant.job_id == job_id)
+        .limit(3)
+    )
+    image_result = await db.execute(image_query)
+    images = [{"image_url": row[0]} for row in image_result.fetchall()]
+
+    # 2. Fetch ad copy and hashtags from instagram_feeds table
+    feed_query = select(InstagramFeed.instagram_ad_copy, InstagramFeed.hashtags).where(InstagramFeed.job_id == job_id).limit(1)
+    feed_result = await db.execute(feed_query)
+    feed_data = feed_result.first()
+
+    if not images and not feed_data:
+        raise HTTPException(status_code=404, detail="No results found for this job ID.")
+
+    return {
+        "images": images,
+        "instagram_ad_copy": feed_data.instagram_ad_copy if feed_data else "피드글을 생성하지 못했습니다.",
+        "hashtags": feed_data.hashtags if feed_data else "#오류"
     }

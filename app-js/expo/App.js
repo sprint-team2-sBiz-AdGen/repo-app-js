@@ -12,49 +12,56 @@ import ShareScreen from "./screens/ShareScreen";
 
 const Stack = createNativeStackNavigator();
 
-export default function App() {
+function App() {
   return (
     <NavigationContainer>
-      <Stack.Navigator initialRouteName="Splash">
-        <Stack.Screen
-          name="Splash"
-          component={SplashScreen}
-          options={{ headerShown: false }}
-        />
-        <Stack.Screen
-          name="Home"
-          component={HomeScreen}
-          options={{ title: "Feedly AI" }}
-        />
-        <Stack.Screen 
-          name="GeneratingScreen" 
-          component={GeneratingScreen} />
-        <Stack.Screen
-          name="StrategySelect"
-          component={StrategySelectScreen}
-          options={{ title: "광고 스타일 선택" }}
-        />
-        <Stack.Screen
-          name="PhotoAndDescription"
-          component={PhotoAndDescriptionScreen}
-          options={{ title: "사진 & 설명" }}
-        />
-        <Stack.Screen
-          name="Generating"
-          component={GeneratingScreen}
-          options={{ headerShown: false }}
-        />
+      {/* Temporarily change initialRouteName and add initialParams for testing */}
+      <Stack.Navigator
+        initialRouteName="Results" // <-- CHANGE THIS
+        screenOptions={{ headerShown: false }}
+      >
+        {/* Pass the test jobId as an initial parameter */}
         <Stack.Screen
           name="Results"
           component={ResultsScreen}
-          options={{ title: "광고 결과" }}
+          initialParams={{ jobId: "b02650e3-c70d-40a0-ad86-758aee877682" }} // <-- ADD THIS
         />
+
+        {/* Keep other screens for when you revert the changes */}
+        <Stack.Screen name="Splash" component={SplashScreen} />
+        <Stack.Screen name="Home" component={HomeScreen} />
         <Stack.Screen
-          name="Share"
-          component={ShareScreen}
-          options={{ title: "업로드" }}
+          name="PhotoAndDescription"
+          component={PhotoAndDescriptionScreen}
         />
+        <Stack.Screen name="GeneratingScreen" component={GeneratingScreen} />
+        <Stack.Screen name="StrategySelect" component={StrategySelectScreen} />
+        {/* <Stack.Screen name="Results" component={ResultsScreen} /> */}
+        <Stack.Screen name="Share" component={ShareScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );
 }
+
+export default App;
+
+// // ...existing code...
+// function App() {
+//   return (
+//     <NavigationContainer>
+//       <Stack.Navigator
+//         initialRouteName="Splash" // <-- REVERT THIS
+//         screenOptions={{ headerShown: false }}
+//       >
+//         <Stack.Screen name="Splash" component={SplashScreen} />
+//         <Stack.Screen name="Home" component={HomeScreen} />
+//         <Stack.Screen name="PhotoAndDescription" component={PhotoAndDescriptionScreen} />
+//         <Stack.Screen name="GeneratingScreen" component={GeneratingScreen} />
+//         <Stack.Screen name="StrategySelect" component={StrategySelectScreen} />
+//         <Stack.Screen name="Results" component={ResultsScreen} />
+//         <Stack.Screen name="Share" component={ShareScreen} />
+//       </Stack.Navigator>
+//     </NavigationContainer>
+//   );
+// }
+// // ...existing code...

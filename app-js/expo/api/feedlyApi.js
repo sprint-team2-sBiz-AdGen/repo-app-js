@@ -146,3 +146,17 @@ export const gptAdCopyKor = async (jobId) => {
   if (!res.ok) throw new Error(JSON.stringify(data));
   return data;
 };
+
+export const getJobResults = async (jobId) => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/v1/jobs/${jobId}/results`);
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
+    }
+    return await response.json();
+  } catch (error) {
+    console.error(`Failed to fetch job results for ${jobId}:`, error);
+    throw error;
+  }
+};
