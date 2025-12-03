@@ -2,9 +2,17 @@
 # version: 1.7.0
 
 import os
+import sys
 import uuid
 import json
 import asyncio
+
+# --- FIX: Remove the sys.path modification. ---
+# This should be handled by how you run uvicorn.
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 from fastapi import FastAPI, Depends, UploadFile, File, Form, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -27,6 +35,20 @@ from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 from sqlalchemy.future import select
+
+from config import ASSETS_DIR, PART_NAME
+from database import (
+    get_db,
+    User,
+    Tenant,
+    Job,
+    ImageAsset,
+    JobInput,
+    LLMModel,
+    LLMTrace,
+    TxtAdCopyGeneration,
+    InstagramFeed
+)
 
 # ============================
 # 🔐 Environment & Config
@@ -150,7 +172,7 @@ class ImageAsset(Base):
     pk = Column(Integer, server_default=text("nextval('image_assets_pk_seq'::regclass)"), nullable=False)  # SERIAL with server default
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-
+    job_id = Column(UUID(as_uuid=True), ForeignKey('jobs.job_id'), nullable=False, primary_key=True) 
 
 class JobInput(Base):
     __tablename__ = 'job_inputs'
@@ -723,11 +745,6 @@ async def create_job(
         print(f"WARNING: Error fetching tone_style: {e}, using None")
 
     # DB writes (ensure column names match schema)
-    new_image = ImageAsset(
-        image_url=path,
-        tenant_id=tenant_id,
-        creator_id=creator_id
-    )
     new_job = Job(
         # The job is first created with this state
         status='done',
@@ -735,9 +752,18 @@ async def create_job(
         tenant_id=tenant_id,
         store_id=store_id_uuid  # Use the store_id we found or created
     )
+    db.add(new_job)
+    await db.flush() # Flush to get the new_job.job_id
 
-    db.add_all([new_image, new_job])
-    await db.flush() # Flush to get IDs for the next objects
+    new_image = ImageAsset(
+        image_url=path,
+        tenant_id=tenant_id,
+        creator_id=creator_id,
+        job_id=new_job.job_id  # FIX: Assign the job_id to the image asset
+    )
+
+    db.add(new_image)
+    await db.flush() # Flush to get the new_image.image_asset_id
 
     new_input = JobInput(
         job_id=new_job.job_id,
@@ -1025,3 +1051,98 @@ async def debug_job_results(job_id: uuid.UUID, db: AsyncSession = Depends(get_db
         "images_from_query": images_data,
         "feed_data": feed_info
     }
+
+@app.post("/jobs", response_model=JobResponse)
+async def create_job(job_data: JobCreate, db: AsyncSession = Depends(get_db)):
+    """
+    1. 이미지 업로드 및 저장
+    2. Job 생성
+    3. JobInput 생성
+    4. Job 상태 업데이트 및 Celery 작업 호출
+    """
+    # 이미지가 base64로 인코딩된 경우 디코딩하여 바이너리 데이터로 변환
+    image = None
+    if job_data.image_base64:
+        try:
+            # base64 문자열에서 순수 데이터 부분만 추출
+            header, encoded = job_data.image_base64.split(",", 1)
+            image_data = base64.b64decode(encoded)
+            
+            # 파일 확장자 확인 (예: 'image/jpeg' -> '.jpg')
+            mime_type = header.split(";")[0].split(":")[1]
+            ext = mimetypes.guess_extension(mime_type) or ".jpg"
+
+        except (ValueError, binascii.Error) as e:
+            raise HTTPException(status_code=400, detail=f"Invalid base64 image data: {e}")
+
+        # --- FIX: Save the image to the correct shared asset location ---
+        try:
+            # Define the target directory based on your requirement
+            # /opt/feedlyai/assets/js/tenants
+            target_base_dir = os.path.join(ASSETS_DIR, "js", "tenants")
+
+            # Create date-based subdirectories (e.g., /2025/12/03)
+            now = datetime.utcnow()
+            date_path = now.strftime("%Y/%m/%d")
+            
+            # Full directory path on the server's filesystem
+            save_dir = os.path.join(target_base_dir, date_path)
+            os.makedirs(save_dir, exist_ok=True)
+
+            # Generate a unique filename
+            unique_name = f"{uuid.uuid4().hex}{ext}"
+            
+            # Final, full path to save the file on the server
+            save_path = os.path.join(save_dir, unique_name)
+
+            # Save the file asynchronously
+            async with aiofiles.open(save_path, 'wb') as f:
+                await f.write(image_data)
+
+            # This is the web-accessible URL path to store in the database
+            # e.g., /assets/js/tenants/2025/12/03/some_uuid.jpg
+            path = f"/assets/js/tenants/{date_path}/{unique_name}"
+
+        except Exception as e:
+            # Consider adding logging here to debug file-saving issues
+            raise HTTPException(status_code=500, detail=f"Failed to save uploaded image: {e}")
+    else:
+        raise HTTPException(status_code=400, detail="No image data provided")
+
+    # DB writes (ensure column names match schema)
+    new_job = Job(
+        # The job is first created with this state
+        status='done',
+        current_step='job_created',
+        tenant_id=job_data.tenant_id,
+        store_id=job_data.store_id  # Use the store_id we found or created
+    )
+    db.add(new_job)
+    await db.flush() # Flush to get the new_job.job_id
+
+    new_image = ImageAsset(
+        image_url=path,
+        tenant_id=job_data.tenant_id,
+        creator_id=job_data.creator_id,
+        job_id=new_job.job_id  # FIX: Assign the job_id to the image asset
+    )
+
+    db.add(new_image)
+    await db.flush() # Flush to get the new_image.image_asset_id
+
+    new_input = JobInput(
+        job_id=new_job.job_id,
+        img_asset_id=new_image.image_asset_id,
+        tone_style_id=job_data.tone_style_id,
+        desc_kor=job_data.description  # use parsed description
+    )
+    db.add(new_input)
+
+    # Immediately update the job to its next state before committing.
+    # This is the final signal to the listener.
+    new_job.current_step = 'user_img_input'
+    new_job.status = 'done' 
+    new_job.updated_at = datetime.utcnow()
+    
+    await db.commit()
+    return {"job_id": str(new_job.job_id), "status": "job_created_and_inputs_submitted"}

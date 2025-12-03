@@ -1,7 +1,7 @@
 -- FeedlyAI Database Schema
--- Version: 1.0
+-- Version: 2.0
 -- Created: 2025-11-16
--- Updated: 2025-12-01
+-- Updated: 2025-12-03
 
 -- Enable UUID extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS image_assets (
     height INTEGER,
     creator_id UUID REFERENCES users(user_id),
     tenant_id VARCHAR(255) REFERENCES tenants(tenant_id),
+    job_id UUID REFERENCES jobs(job_id),  -- FK: Job 연결 (선택적, 파이프라인에서 생성된 이미지의 경우)
     pk SERIAL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
@@ -216,6 +217,7 @@ CREATE TABLE IF NOT EXISTS vlm_prompt_assets (
 CREATE TABLE IF NOT EXISTS vlm_traces (
     vlm_trace_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     job_id UUID REFERENCES jobs(job_id),  -- FK
+    job_variants_id UUID REFERENCES jobs_variants(job_variants_id) ON DELETE SET NULL,  -- FK: Job Variant 연결 (병렬 실행 시 variant 구분)
     provider TEXT,  -- Example: 'llava'
     prompt_id UUID REFERENCES vlm_prompt_assets(prompt_asset_id) ON DELETE SET NULL,  -- FK: VLM 프롬프트 참조
     operation_type TEXT,  -- Possible values: analyze, planner, judge
@@ -456,6 +458,7 @@ CREATE TABLE IF NOT EXISTS connected_nodes (
 -- Foreign Key 인덱스
 CREATE INDEX IF NOT EXISTS idx_image_assets_creator_id ON image_assets(creator_id);
 CREATE INDEX IF NOT EXISTS idx_image_assets_tenant_id ON image_assets(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_image_assets_job_id ON image_assets(job_id);
 CREATE INDEX IF NOT EXISTS idx_stores_user_id ON stores(user_id);
 CREATE INDEX IF NOT EXISTS idx_stores_image_id ON stores(image_id);
 CREATE INDEX IF NOT EXISTS idx_gen_runs_job_id ON gen_runs(job_id);
@@ -505,8 +508,10 @@ CREATE INDEX IF NOT EXISTS idx_jobs_variants_status_retry_count ON jobs_variants
 CREATE INDEX IF NOT EXISTS idx_jobs_variants_job_id_retry_count ON jobs_variants(job_id, retry_count);
 CREATE INDEX IF NOT EXISTS idx_jobs_variants_overlaid_img_asset_id ON jobs_variants(overlaid_img_asset_id);
 CREATE INDEX IF NOT EXISTS idx_vlm_traces_job_id ON vlm_traces(job_id);
+CREATE INDEX IF NOT EXISTS idx_vlm_traces_job_variants_id ON vlm_traces(job_variants_id);
 CREATE INDEX IF NOT EXISTS idx_vlm_traces_prompt_id ON vlm_traces(prompt_id);
 CREATE INDEX IF NOT EXISTS idx_vlm_traces_operation_type ON vlm_traces(operation_type);
+CREATE INDEX IF NOT EXISTS idx_vlm_traces_job_id_variants_id ON vlm_traces(job_id, job_variants_id);
 CREATE INDEX IF NOT EXISTS idx_llm_traces_job_id ON llm_traces(job_id);
 CREATE INDEX IF NOT EXISTS idx_llm_traces_llm_model_id ON llm_traces(llm_model_id);
 CREATE INDEX IF NOT EXISTS idx_llm_traces_tone_style_id ON llm_traces(tone_style_id);
@@ -721,6 +726,7 @@ COMMENT ON COLUMN image_assets.width IS '이미지 가로 크기 (픽셀)';
 COMMENT ON COLUMN image_assets.height IS '이미지 세로 크기 (픽셀)';
 COMMENT ON COLUMN image_assets.creator_id IS 'FK: 이미지 생성자 ID (users 테이블 참조)';
 COMMENT ON COLUMN image_assets.tenant_id IS 'FK: 테넌트 ID (tenants 테이블 참조)';
+COMMENT ON COLUMN image_assets.job_id IS 'FK: Job ID (jobs 테이블 참조, 선택적, 파이프라인에서 생성된 이미지의 경우)';
 COMMENT ON COLUMN image_assets.pk IS '자동 증가 기본 키 (SERIAL)';
 COMMENT ON COLUMN image_assets.created_at IS '레코드 생성 시간';
 COMMENT ON COLUMN image_assets.updated_at IS '레코드 수정 시간';
@@ -855,6 +861,7 @@ COMMENT ON COLUMN vlm_prompt_assets.updated_at IS '레코드 수정 시간';
 -- vlm_traces 테이블 컬럼 주석
 COMMENT ON COLUMN vlm_traces.vlm_trace_id IS 'VLM 추적 고유 식별자 (UUID)';
 COMMENT ON COLUMN vlm_traces.job_id IS 'FK: 작업 ID (jobs 테이블 참조)';
+COMMENT ON COLUMN vlm_traces.job_variants_id IS 'FK: 작업 변형 ID (jobs_variants 테이블 참조, 병렬 실행 시 variant 구분)';
 COMMENT ON COLUMN vlm_traces.provider IS 'VLM 제공자 (예: llava)';
 COMMENT ON COLUMN vlm_traces.prompt_id IS 'FK: VLM 프롬프트 ID (vlm_prompt_assets 테이블 참조)';
 COMMENT ON COLUMN vlm_traces.operation_type IS '작업 타입 (analyze, planner, judge)';
