@@ -35,7 +35,7 @@ export default function ShareScreen({ route, navigation }) {
       </ViewShot>
 
       <TouchableOpacity style={cs.primaryButton} onPress={copyToClipboard}>
-        <Text style={cs.primaryButtonText}>광고 & 인스타그램 피드 복사하기</Text>
+        <Text style={cs.primaryButtonText}>복사하기</Text>
       </TouchableOpacity>
 
       <TouchableOpacity
