@@ -11,6 +11,7 @@ import ResultsScreen from "./screens/ResultsScreen";
 import ShareScreen from "./screens/ShareScreen";
 
 const Stack = createNativeStackNavigator();
+
 function App() {
   return (
     <NavigationContainer>
@@ -36,7 +37,7 @@ function App() {
 //       {/* Temporarily change initialRouteName and add initialParams for testing */}
 //       <Stack.Navigator
 //         initialRouteName="Results" // <-- CHANGE THIS
-//         screenOptions={{ headerShown: false }}
+//         screenOptions={{ headerShown: true }}
 //       >
 //         {/* Pass the test jobId as an initial parameter */}
 //         <Stack.Screen

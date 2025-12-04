@@ -255,7 +255,10 @@ class InstagramFeed(Base):
     used_max_tokens = Column(Integer, nullable=True)
     llm_trace_id = Column(UUID(as_uuid=True), nullable=True)
     ad_copy_kor = Column(Text, nullable=True)
-
+    pk = Column(Integer, server_default=text("nextval('instagram_feeds_pk_seq'::regclass)"), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    
 # --- Pydantic response models ---
 class JobResultImage(BaseModel):
     image_url: str
@@ -598,6 +601,10 @@ async def create_job(
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Invalid description payload: {e}")
 
+    # --- FIX: Force a fixed tenant_id for all jobs ---
+    tenant_id = "user_0b1bfa70-20a4-4807-a5b1-397e3c197ab8"
+    print(f"DEBUG: Forcing fixed tenant_id: {tenant_id}")
+
     # Save image to the correct asset location
     # Path format: /assets/js/tenants/{tenant_id}/original/{year}/{month:02d}/{day:02d}/{filename}
     image_filename = image.filename if image.filename else 'upload.jpg'
@@ -679,26 +686,27 @@ async def create_job(
             db.add(tenant_obj)
             await db.flush()
             print(f"DEBUG: Created new tenant: {tenant_id}")
-    else:
-        # No tenant_id provided, create user-specific tenant
-        user_tenant_id = f"user_{creator_id}"
-        tenant_result = await db.execute(select(Tenant).filter(Tenant.tenant_id == user_tenant_id))
-        tenant_obj = tenant_result.scalar_one_or_none()
-        if tenant_obj:
-            tenant_id = user_tenant_id
-            print(f"DEBUG: Using existing user tenant: {tenant_id}")
-        else:
-            # Create user-specific tenant
-            print(f"INFO: Creating user-specific tenant: {user_tenant_id}")
-            tenant_obj = Tenant(
-                tenant_id=user_tenant_id,
-                display_name=f"User Tenant {creator_id}",
-                uid=f"tenant_{user_tenant_id}"
-            )
-            db.add(tenant_obj)
-            await db.flush()
-            tenant_id = user_tenant_id
-            print(f"DEBUG: Created user-specific tenant: {tenant_id}")
+    # --- REMOVED: This 'else' block is no longer reachable because tenant_id is always set ---
+    # else:
+    #     # No tenant_id provided, create user-specific tenant
+    #     user_tenant_id = f"user_{creator_id}"
+    #     tenant_result = await db.execute(select(Tenant).filter(Tenant.tenant_id == user_tenant_id))
+    #     tenant_obj = tenant_result.scalar_one_or_none()
+    #     if tenant_obj:
+    #         tenant_id = user_tenant_id
+    #         print(f"DEBUG: Using existing user tenant: {tenant_id}")
+    #     else:
+    #         # Create user-specific tenant
+    #         print(f"INFO: Creating user-specific tenant: {user_tenant_id}")
+    #         tenant_obj = Tenant(
+    #             tenant_id=user_tenant_id,
+    #             display_name=f"User Tenant {creator_id}",
+    #             uid=f"tenant_{user_tenant_id}"
+    #         )
+    #         db.add(tenant_obj)
+    #         await db.flush()
+    #         tenant_id = user_tenant_id
+    #         print(f"DEBUG: Created user-specific tenant: {tenant_id}")
     
     # 3. Get or create store for the user
     store_obj = None
@@ -1014,9 +1022,12 @@ async def get_job_results(job_id: uuid.UUID, db: AsyncSession = Depends(get_db))
         )
 
     # 6. Return final results
+    # --- FIX: Wrap each image path in an object to match frontend expectation ---
+    images_as_objects = [{"image_url": path} for path in image_paths]
+    
     return {
         "job_id": job_id,
-        "images": image_paths,
+        "images": images_as_objects,
         "instagram_ad_copy": feed_data.instagram_ad_copy,
         "hashtags": feed_data.hashtags
     }
@@ -1211,6 +1222,10 @@ async def create_job(
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Invalid description payload: {e}")
 
+    # --- FIX: Force a fixed tenant_id for all jobs ---
+    tenant_id = "user_0b1bfa70-20a4-4807-a5b1-397e3c197ab8"
+    print(f"DEBUG: Forcing fixed tenant_id: {tenant_id}")
+
     # Save image to the correct asset location
     # Path format: /assets/js/tenants/{tenant_id}/original/{year}/{month:02d}/{day:02d}/{filename}
     image_filename = image.filename if image.filename else 'upload.jpg'
@@ -1292,26 +1307,27 @@ async def create_job(
             db.add(tenant_obj)
             await db.flush()
             print(f"DEBUG: Created new tenant: {tenant_id}")
-    else:
-        # No tenant_id provided, create user-specific tenant
-        user_tenant_id = f"user_{creator_id}"
-        tenant_result = await db.execute(select(Tenant).filter(Tenant.tenant_id == user_tenant_id))
-        tenant_obj = tenant_result.scalar_one_or_none()
-        if tenant_obj:
-            tenant_id = user_tenant_id
-            print(f"DEBUG: Using existing user tenant: {tenant_id}")
-        else:
-            # Create user-specific tenant
-            print(f"INFO: Creating user-specific tenant: {user_tenant_id}")
-            tenant_obj = Tenant(
-                tenant_id=user_tenant_id,
-                display_name=f"User Tenant {creator_id}",
-                uid=f"tenant_{user_tenant_id}"
-            )
-            db.add(tenant_obj)
-            await db.flush()
-            tenant_id = user_tenant_id
-            print(f"DEBUG: Created user-specific tenant: {tenant_id}")
+    # --- REMOVED: This 'else' block is no longer reachable because tenant_id is always set ---
+    # else:
+    #     # No tenant_id provided, create user-specific tenant
+    #     user_tenant_id = f"user_{creator_id}"
+    #     tenant_result = await db.execute(select(Tenant).filter(Tenant.tenant_id == user_tenant_id))
+    #     tenant_obj = tenant_result.scalar_one_or_none()
+    #     if tenant_obj:
+    #         tenant_id = user_tenant_id
+    #         print(f"DEBUG: Using existing user tenant: {tenant_id}")
+    #     else:
+    #         # Create user-specific tenant
+    #         print(f"INFO: Creating user-specific tenant: {user_tenant_id}")
+    #         tenant_obj = Tenant(
+    #             tenant_id=user_tenant_id,
+    #             display_name=f"User Tenant {creator_id}",
+    #             uid=f"tenant_{user_tenant_id}"
+    #         )
+    #         db.add(tenant_obj)
+    #         await db.flush()
+    #         tenant_id = user_tenant_id
+    #         print(f"DEBUG: Created user-specific tenant: {tenant_id}")
     
     # 3. Get or create store for the user
     store_obj = None
@@ -1627,8 +1643,12 @@ async def get_job_results(job_id: uuid.UUID, db: AsyncSession = Depends(get_db))
         )
 
     # 6. Return final results
+    # --- FIX: Wrap each image path in an object to match frontend expectation ---
+    images_as_objects = [{"image_url": path} for path in image_paths]
+    
     return {
         "job_id": job_id,
-        "images": image_paths,
-        "instagram_ad_copy
-        }
+        "images": images_as_objects,
+        "instagram_ad_copy": feed_data.instagram_ad_copy,
+        "hashtags": feed_data.hashtags
+    }

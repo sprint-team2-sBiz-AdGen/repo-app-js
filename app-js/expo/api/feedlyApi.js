@@ -3,8 +3,8 @@ import axios from 'axios';
 // Use a single, consistent base URL
 const API_BASE_URL = 'http://34.9.178.28:8012';
 
-// Create a centralized axios instance
-const api = axios.create({
+// --- FIX: Export the centralized axios instance ---
+export const api = axios.create({
   baseURL: API_BASE_URL,
   timeout: 60000, // 1 minute timeout
 });
@@ -23,8 +23,8 @@ export const createGenerationJob = async (imageUri, description) => {
   formData.append('description', description);
 
   try {
-    // FIX 2: Use the correct endpoint '/jobs' and add Authorization header
-    const response = await api.post('/jobs', formData, {
+    // --- FIX: Use the correct endpoint '/api/v1/jobs/create' ---
+    const response = await api.post('/api/v1/jobs/create', formData, {
       headers: {
         'Content-Type': 'multipart/form-data',
         // This default token provides the tenant_id to the backend
