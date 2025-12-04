@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
 
 # --- Use Async SQLAlchemy components ---
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Integer, Float, Boolean, text, func
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Integer, Float, Boolean, text, func, or_
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship
@@ -601,6 +601,10 @@ async def create_job(
         store_id_uuid = None
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Invalid description payload: {e}")
+    
+    # Extract strategy name from request data
+    strategy_name = data.get("strategy") if isinstance(data, dict) else None
+    print(f"DEBUG: Received strategy: {strategy_name}")
 
     # --- FIX: Force a fixed tenant_id for all jobs ---
     tenant_id = "user_0b1bfa70-20a4-4807-a5b1-397e3c197ab8"
@@ -741,19 +745,46 @@ async def create_job(
             store_id_uuid = store_obj.store_id
             print(f"DEBUG: Created user-specific store: {store_id_uuid}")
     
-    # 4. Get default tone_style (optional, can be None)
+    # 4. Get tone_style_id based on selected strategy (using code column)
     tone_style_id = None
     try:
-        # Try to get the first active tone_style (or any tone_style if no active flag)
-        tone_style_result = await db.execute(select(ToneStyle).limit(1))
-        tone_style_obj = tone_style_result.scalar_one_or_none()
-        if tone_style_obj:
-            tone_style_id = tone_style_obj.tone_style_id
-            print(f"DEBUG: Using tone_style_id: {tone_style_id}")
+        if strategy_name:
+            # Normalize strategy name to match code in DB (lowercase)
+            strategy_code = strategy_name.lower()
+            
+            print(f"DEBUG: Looking for tone_style with code='{strategy_code}' for strategy='{strategy_name}'")
+            
+            # Query tone_styles table by code field (much simpler with code column!)
+            tone_style_result = await db.execute(
+                select(ToneStyle).where(ToneStyle.code == strategy_code)
+            )
+            tone_style_obj = tone_style_result.scalar_one_or_none()
+            
+            if tone_style_obj:
+                tone_style_id = tone_style_obj.tone_style_id
+                print(f"DEBUG: ✅ Found tone_style_id: {tone_style_id} for strategy '{strategy_name}' (code: {tone_style_obj.code})")
+            else:
+                print(f"WARNING: No tone_style found for code '{strategy_code}', using first available")
+                # Fallback: get the first tone_style
+                fallback_result = await db.execute(select(ToneStyle).limit(1))
+                fallback_obj = fallback_result.scalar_one_or_none()
+                if fallback_obj:
+                    tone_style_id = fallback_obj.tone_style_id
+                    print(f"DEBUG: Using fallback tone_style_id: {tone_style_id}")
         else:
-            print("WARNING: No tone_style found in database, using None")
+            print("DEBUG: No strategy provided, using first available tone_style")
+            # No strategy provided, get the first tone_style
+            tone_style_result = await db.execute(select(ToneStyle).limit(1))
+            tone_style_obj = tone_style_result.scalar_one_or_none()
+            if tone_style_obj:
+                tone_style_id = tone_style_obj.tone_style_id
+                print(f"DEBUG: Using first available tone_style_id: {tone_style_id}")
+            else:
+                print("WARNING: No tone_style found in database, using None")
     except Exception as e:
         print(f"WARNING: Error fetching tone_style: {e}, using None")
+        import traceback
+        traceback.print_exc()
 
     # DB writes (ensure column names match schema)
     new_job = Job(
@@ -1032,387 +1063,6 @@ async def get_job_results(job_id: uuid.UUID, db: AsyncSession = Depends(get_db))
         "instagram_ad_copy": feed_data.instagram_ad_copy,
         "hashtags": feed_data.hashtags
     }
-
-# ============================
-# 🖼️ Image Upload Endpoint
-# ============================
-
-# --- FIX: Change the endpoint URL to match the expected API structure ---
-@app.post("/api/v1/jobs/create", status_code=200)
-async def create_job(
-    request: Request,
-    db: AsyncSession = Depends(get_db)
-):
-    # Log raw inputs to confirm parser
-    print("=" * 50)
-    print("DEBUG create_job called")
-    print("DEBUG content-type:", request.headers.get("content-type"))
-    
-    # Try to parse as multipart form data
-    try:
-        form_data = await request.form()
-        print("DEBUG form_data keys:", list(form_data.keys()))
-        print("DEBUG form_data type:", type(form_data))
-        
-        # React Native FormData sends { uri, name, type } which gets stringified to "[object Object]"
-        # We need to iterate through all form entries to find the actual file
-        image = None
-        request_field = None
-        description_field = None
-        
-        # Iterate through all form entries
-        for key in form_data.keys():
-            value = form_data.get(key)
-            print(f"DEBUG form key '{key}': type={type(value)}, has_read={hasattr(value, 'read') if value else False}")
-            
-            if key == "image":
-                # Check if it's an UploadFile
-                if hasattr(value, 'read') and hasattr(value, 'filename'):
-                    image = value
-                    print(f"DEBUG Found UploadFile: filename={value.filename}")
-                else:
-                    print(f"WARNING: 'image' field is not an UploadFile: {type(value)}, value={str(value)[:100]}")
-            elif key == "image_base64":
-                # React Native에서 base64로 인코딩된 이미지
-                image_base64 = value
-                image_name = form_data.get("image_name", "upload.jpg")
-                print(f"DEBUG Found base64 image: name={image_name}, length={len(image_base64) if isinstance(image_base64, str) else 'N/A'}")
-            elif key == "image_name":
-                # 이미지 이름은 위에서 처리됨
-                pass
-            elif key == "request":
-                request_field = value
-            elif key == "description":
-                description_field = value
-        
-        # If image is still None, try to get it from form_data._list (internal structure)
-        if image is None:
-            print("WARNING: Image not found in form_data.keys(), trying _list")
-            if hasattr(form_data, '_list'):
-                print(f"DEBUG _list type: {type(form_data._list)}, length: {len(form_data._list) if hasattr(form_data._list, '__len__') else 'N/A'}")
-                for idx, item in enumerate(form_data._list):
-                    print(f"DEBUG _list[{idx}]: type={type(item)}, value={str(item)[:100] if not hasattr(item, 'read') else 'UploadFile'}")
-                    if isinstance(item, tuple) and len(item) >= 2:
-                        key, value = item[0], item[1]
-                        print(f"DEBUG _list item: key={key}, value_type={type(value)}")
-                        if key == "image" and hasattr(value, 'read'):
-                            image = value
-                            print(f"DEBUG Found UploadFile in _list: filename={value.filename}")
-                            break
-        
-        # Last resort: try to parse multipart body manually
-        if image is None:
-            print("WARNING: Image still not found, trying to parse multipart body manually")
-            try:
-                # Reset the request body stream
-                body = await request.body()
-                print(f"DEBUG body length: {len(body)}")
-                
-                # Try to use python-multipart to parse
-                from multipart import parse_form_data
-                import io
-                
-                # Parse the multipart data
-                content_type = request.headers.get("content-type", "")
-                boundary = content_type.split("boundary=")[-1] if "boundary=" in content_type else None
-                
-                if boundary:
-                    print(f"DEBUG boundary: {boundary}")
-                    # Create a file-like object from body
-                    body_stream = io.BytesIO(body)
-                    
-                    # Parse multipart form data
-                    fields, files = parse_form_data(body_stream, boundary.encode())
-                    print(f"DEBUG parsed fields: {list(fields.keys())}")
-                    print(f"DEBUG parsed files: {list(files.keys())}")
-                    
-                    if "image" in files:
-                        file_info = files["image"]
-                        print(f"DEBUG file_info: {file_info}")
-                        # file_info is a tuple (filename, file_object)
-                        if isinstance(file_info, tuple) and len(file_info) >= 2:
-                            filename, file_obj = file_info[0], file_info[1]
-                            # Read the file content
-                            file_content = file_obj.read()
-                            # Create a temporary UploadFile-like object
-                            from fastapi import UploadFile as FastAPIUploadFile
-                            from io import BytesIO
-                            
-                            image = FastAPIUploadFile(
-                                filename=filename or "upload.jpg",
-                                file=BytesIO(file_content)
-                            )
-                            print(f"DEBUG Created UploadFile from manual parsing: filename={filename}")
-            except Exception as e:
-                print(f"ERROR in manual multipart parsing: {e}")
-                import traceback
-                traceback.print_exc()
-        
-        # If image is still None, check if we have base64 image
-        if image is None and 'image_base64' in locals() and image_base64:
-            print("DEBUG Processing base64 image")
-            try:
-                import base64
-                from io import BytesIO
-                from fastapi import UploadFile as FastAPIUploadFile
-                
-                # Decode base64 image
-                image_data = base64.b64decode(image_base64)
-                image = FastAPIUploadFile(
-                    filename=image_name if 'image_name' in locals() else "upload.jpg",
-                    file=BytesIO(image_data)
-                )
-                print(f"DEBUG Created UploadFile from base64: filename={image.filename}")
-            except Exception as e:
-                print(f"ERROR decoding base64 image: {e}")
-                import traceback
-                traceback.print_exc()
-                raise HTTPException(status_code=422, detail=f"Failed to decode base64 image: {str(e)}")
-        
-        if image is None:
-            raise HTTPException(
-                status_code=422,
-                detail="Could not extract image file from FormData. React Native FormData may not be properly configured."
-            )
-        
-        print("DEBUG image filename:", image.filename if hasattr(image, 'filename') else 'N/A')
-        print("DEBUG image content_type:", image.content_type if hasattr(image, 'content_type') else 'N/A')
-        
-        # Get request or description field
-        request_field = form_data.get("request")
-        description_field = form_data.get("description")
-        
-        print("DEBUG request field:", request_field)
-        print("DEBUG description field:", description_field)
-        print("=" * 50)
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"ERROR parsing form data: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=422, detail=f"Failed to parse form data: {str(e)}")
-    
-    # Prefer 'request' JSON, fallback to plain 'description'
-    raw = request_field or description_field
-    if not raw:
-        raise HTTPException(status_code=422, detail="Missing form field: 'request' or 'description'")
-
-    if not isinstance(raw, str):
-        raw = str(raw)
-
-    try:
-        data = json.loads(raw) if raw.strip().startswith("{") else {"description": raw}
-        description_text = (data.get("description") or raw).strip()
-        # Pull optional tenant/store from payload (no defaults)
-        tenant_id = data.get("tenant_id")
-        store_id_uuid = None
-        store_id_raw = data.get("store_id")
-        if store_id_raw:
-            try:
-                store_id_uuid = uuid.UUID(str(store_id_raw))
-            except Exception:
-                store_id_uuid = None
-        if not description_text:
-            raise ValueError("Description is empty")
-    except json.JSONDecodeError:
-        description_text = raw.strip()
-        tenant_id = None
-        store_id_uuid = None
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Invalid description payload: {e}")
-
-    # --- FIX: Force a fixed tenant_id for all jobs ---
-    tenant_id = "user_0b1bfa70-20a4-4807-a5b1-397e3c197ab8"
-    print(f"DEBUG: Forcing fixed tenant_id: {tenant_id}")
-
-    # Save image to the correct asset location
-    # Path format: /assets/js/tenants/{tenant_id}/original/{year}/{month:02d}/{day:02d}/{filename}
-    image_filename = image.filename if image.filename else 'upload.jpg'
-    file_ext = os.path.splitext(image_filename)[1]
-    unique_filename = f"{uuid.uuid4().hex}{file_ext}"
-    
-    # Set kind to "original" for create_job()
-    kind = "original"
-    
-    # Get current date
-    now = datetime.utcnow()
-    year = now.year
-    month = f"{now.month:02d}"
-    day = f"{now.day:02d}"
-    
-    # Full directory path on the server's filesystem
-    # e.g., /opt/feedlyai/assets/js/tenants/{tenant_id}/original/2025/12/03
-    save_dir = os.path.join(ASSETS_ROOT, "js", "tenants", tenant_id, kind, str(year), month, day)
-    os.makedirs(save_dir, exist_ok=True)
-    
-    # Final, full path to save the file on the server
-    save_path = os.path.join(save_dir, unique_filename)
-    
-    # Save the image file
-    try:
-        image_content = await image.read()
-        with open(save_path, "wb") as f:
-            f.write(image_content)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save image: {e}")
-    
-    # This is the web-accessible URL path to store in the database
-    # e.g., /assets/js/tenants/{tenant_id}/original/2025/12/03/some_uuid.jpg
-    path = f"/assets/js/tenants/{tenant_id}/{kind}/{year}/{month}/{day}/{unique_filename}"
-
-    # Reference existing records from tone_styles, users, tenants tables
-    # 1. Get or create user based on DEFAULT_USER_ID
-    user_obj = None
-    creator_id = None
-    if DEFAULT_USER_ID:
-        try:
-            user_uuid = uuid.UUID(str(DEFAULT_USER_ID))
-            user_result = await db.execute(select(User).filter(User.user_id == user_uuid))
-            user_obj = user_result.scalar_one_or_none()
-            if user_obj:
-                creator_id = user_obj.user_id
-                print(f"DEBUG: Found user: {creator_id}")
-            else:
-                # User doesn't exist, create a new one
-                print(f"INFO: User '{DEFAULT_USER_ID}' not found, creating new user")
-                user_obj = User(
-                    user_id=user_uuid,
-                    uid=f"user_{user_uuid}"
-                )
-                db.add(user_obj)
-                await db.flush()
-                creator_id = user_obj.user_id
-                print(f"DEBUG: Created new user: {creator_id}")
-        except Exception as e:
-            print(f"ERROR: Invalid DEFAULT_USER_ID '{DEFAULT_USER_ID}': {e}")
-            raise HTTPException(status_code=400, detail=f"Invalid DEFAULT_USER_ID: {str(e)}")
-    else:
-        raise HTTPException(status_code=400, detail="DEFAULT_USER_ID is required but not set in environment variables")
-    
-    # 2. Get or create tenant based on user (user-specific tenant)
-    tenant_obj = None
-    if tenant_id:
-        # If tenant_id is provided in request, use it
-        tenant_result = await db.execute(select(Tenant).filter(Tenant.tenant_id == tenant_id))
-        tenant_obj = tenant_result.scalar_one_or_none()
-        if not tenant_obj:
-            # Tenant doesn't exist, create a new one
-            print(f"INFO: Tenant '{tenant_id}' not found in database, creating new tenant")
-            tenant_obj = Tenant(
-                tenant_id=tenant_id,
-                display_name=f"Tenant {tenant_id}",
-                uid=f"tenant_{tenant_id}"
-            )
-            db.add(tenant_obj)
-            await db.flush()
-            print(f"DEBUG: Created new tenant: {tenant_id}")
-    # --- REMOVED: This 'else' block is no longer reachable because tenant_id is always set ---
-    # else:
-    #     # No tenant_id provided, create user-specific tenant
-    #     user_tenant_id = f"user_{creator_id}"
-    #     tenant_result = await db.execute(select(Tenant).filter(Tenant.tenant_id == user_tenant_id))
-    #     tenant_obj = tenant_result.scalar_one_or_none()
-    #     if tenant_obj:
-    #         tenant_id = user_tenant_id
-    #         print(f"DEBUG: Using existing user tenant: {tenant_id}")
-    #     else:
-    #         # Create user-specific tenant
-    #         print(f"INFO: Creating user-specific tenant: {user_tenant_id}")
-    #         tenant_obj = Tenant(
-    #             tenant_id=user_tenant_id,
-    #             display_name=f"User Tenant {creator_id}",
-    #             uid=f"tenant_{user_tenant_id}"
-    #         )
-    #         db.add(tenant_obj)
-    #         await db.flush()
-    #         tenant_id = user_tenant_id
-    #         print(f"DEBUG: Created user-specific tenant: {tenant_id}")
-    
-    # 3. Get or create store for the user
-    store_obj = None
-    # Check if store_id was provided in request
-    if store_id_uuid:
-        # If store_id is provided in request, verify it exists
-        store_result = await db.execute(select(Store).filter(Store.store_id == store_id_uuid))
-        store_obj = store_result.scalar_one_or_none()
-        if not store_obj:
-            print(f"WARNING: Store '{store_id_uuid}' not found in database, will create new one")
-            store_id_uuid = None
-    
-    if not store_id_uuid:
-        # No store_id provided or not found, find or create user-specific store
-        store_result = await db.execute(select(Store).filter(Store.user_id == creator_id).limit(1))
-        store_obj = store_result.scalar_one_or_none()
-        if store_obj:
-            store_id_uuid = store_obj.store_id
-            print(f"DEBUG: Using existing user store: {store_id_uuid}")
-        else:
-            # Create user-specific store
-            print(f"INFO: Creating user-specific store for user: {creator_id}")
-            store_obj = Store(
-                user_id=creator_id,
-                title=f"Store for User {creator_id}",
-                body=f"Default store for user {creator_id}",
-                store_category="default"
-            )
-            db.add(store_obj)
-            await db.flush()
-            store_id_uuid = store_obj.store_id
-            print(f"DEBUG: Created user-specific store: {store_id_uuid}")
-    
-    # 4. Get default tone_style (optional, can be None)
-    tone_style_id = None
-    try:
-        # Try to get the first active tone_style (or any tone_style if no active flag)
-        tone_style_result = await db.execute(select(ToneStyle).limit(1))
-        tone_style_obj = tone_style_result.scalar_one_or_none()
-        if tone_style_obj:
-            tone_style_id = tone_style_obj.tone_style_id
-            print(f"DEBUG: Using tone_style_id: {tone_style_id}")
-        else:
-            print("WARNING: No tone_style found in database, using None")
-    except Exception as e:
-        print(f"WARNING: Error fetching tone_style: {e}, using None")
-
-    # DB writes (ensure column names match schema)
-    new_job = Job(
-        # The job is first created with this state
-        status='done',
-        current_step='job_created',
-        tenant_id=tenant_id,
-        store_id=store_id_uuid  # Use the store_id we found or created
-    )
-    db.add(new_job)
-    await db.flush() # Flush to get the new_job.job_id
-
-    new_image = ImageAsset(
-        image_url=path,
-        tenant_id=tenant_id,
-        creator_id=creator_id,
-        job_id=new_job.job_id  # FIX: Assign the job_id to the image asset
-    )
-
-    db.add(new_image)
-    await db.flush() # Flush to get the new_image.image_asset_id
-
-    new_input = JobInput(
-        job_id=new_job.job_id,
-        img_asset_id=new_image.image_asset_id,
-        tone_style_id=tone_style_id,
-        desc_kor=description_text  # use parsed description
-    )
-    db.add(new_input)
-
-    # Immediately update the job to its next state before committing.
-    # This is the final signal to the listener.
-    new_job.current_step = 'user_img_input'
-    new_job.status = 'done' 
-    new_job.updated_at = datetime.utcnow()
-    
-    await db.commit()
-    return {"job_id": str(new_job.job_id), "status": "job_created_and_inputs_submitted"}
 
 @app.post("/api/js/gpt/kor-to-eng")
 async def gpt_kor_to_eng(req: KorToEngRequest, db: AsyncSession = Depends(get_db)):

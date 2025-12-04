@@ -9,7 +9,7 @@ export const api = axios.create({
   timeout: 60000, // 1 minute timeout
 });
 
-export const createGenerationJob = async (imageUri, description) => {
+export const createGenerationJob = async (imageUri, description, strategy = null) => {
   const formData = new FormData();
   const name = imageUri.split('/').pop() || 'upload.jpg';
 
@@ -19,8 +19,18 @@ export const createGenerationJob = async (imageUri, description) => {
     type: 'image/jpeg',
   });
 
-  // FIX 1: Use the correct form field name 'description'
-  formData.append('description', description);
+  // Create request object with description and strategy
+  const requestData = {
+    description: description,
+  };
+
+  // Add strategy information if provided
+  if (strategy) {
+    requestData.strategy = strategy.name; // Send strategy name (e.g., "hero", "seasonal", "comfort", "Minimal")
+  }
+
+  // FIX: Send as JSON string in the 'request' field
+  formData.append('request', JSON.stringify(requestData));
 
   try {
     // --- FIX: Use the correct endpoint '/api/v1/jobs/create' ---

@@ -2,7 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { View, Text, TouchableOpacity, Image, TextInput, StyleSheet, Alert, ScrollView, ActivityIndicator, Linking, KeyboardAvoidingView, Platform } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { commonStyles as cs } from './_styles';
-import { createGenerationJob, gptKorToEng, gptAdCopyEng, gptAdCopyKor } from '../api/feedlyApi'; 
+import { createGenerationJob, gptKorToEng, gptAdCopyEng, gptAdCopyKor } from '../api/feedlyApi';
 import { STRATEGIES } from '../constants/strategies';
 
 export default function PhotoAndDescriptionScreen({ route, navigation }) {
@@ -60,14 +60,14 @@ export default function PhotoAndDescriptionScreen({ route, navigation }) {
 
     try {
       console.log("--- Starting Generation Job ---");
-    
+
       // 1. Create the initial job record and upload the image.
-      const result = await createGenerationJob(imageUri, description);
+      const result = await createGenerationJob(imageUri, description, strategy);
       const jobId = result.job_id;
       console.log(`Job created with ID: ${jobId}`);
-      
+
       // --- FIX: Await each step in the pipeline sequentially ---
-      
+
       // 2. Run Korean to English translation and wait for it to complete.
       console.log("Step 1: Translating to English...");
       await gptKorToEng(jobId);
@@ -84,7 +84,7 @@ export default function PhotoAndDescriptionScreen({ route, navigation }) {
       console.log("Step 3: Complete.");
 
       console.log("--- All generation steps successful ---");
-      
+
       // 5. Navigate to the results screen.
       navigation.navigate('GeneratingScreen', { jobId: jobId });
 
