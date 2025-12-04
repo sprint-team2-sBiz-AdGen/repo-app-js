@@ -53,7 +53,7 @@ export default function GeneratingScreen({ route, navigation }) {
           if (results && results.images && results.images.length > 0 && results.instagram_ad_copy) {
             console.log("Success: Final results are ready.");
             stopAllTimers();
-            navigation.replace("ResultScreen", { jobId }); // Navigate to the final screen
+            navigation.replace("Results", { jobId }); // Navigate to the final screen
           } else {
             console.log("Results not ready yet, continuing to poll...");
           }

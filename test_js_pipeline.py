@@ -73,19 +73,24 @@ def test_create_job(image_path: str, description: str) -> Optional[str]:
         print(f"❌ 이미지 파일을 찾을 수 없습니다: {image_path}")
         return None
     
+    # --- FIX: Use the corrected and consistent endpoint URL ---
     url = f"{API_BASE_URL}/api/v1/jobs/create"
+    
+    # --- Authorization header is still required ---
+    headers = {
+        'Authorization': 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0ZW5hbnRfaWQiOiJkZWZhdWx0X3RlbmFudF9pZCJ9.5_V24T6a-3s_Gk3b_I-g_f_x_y_z'
+    }
     
     with open(image_path, 'rb') as f:
         files = {'image': (os.path.basename(image_path), f, 'image/jpeg')}
-        data = {
-            'request': json.dumps({'description': description})
-        }
+        # --- FIX 3: Use the correct form field name 'description' ---
+        data = {'description': description}
         
         print(f"Request URL: {url}")
         print(f"Description: {description}")
         print(f"Image: {image_path}")
         
-        response = requests.post(url, files=files, data=data)
+        response = requests.post(url, files=files, data=data, headers=headers)
         result = print_response(response, "Job 생성")
         
         if response.status_code == 200 and result:

@@ -413,19 +413,19 @@ async def get_or_create_llm_model(db: AsyncSession, model_name: str, provider: s
 async def root(): return {"message": "Feedly AI API is running"}
 
 # Replace the existing create_job endpoint with this more tolerant version
-@app.post("/api/v1/jobs/create")
+@app.post("/api/v1/jobs/create", status_code=200)
 async def create_job(
-    request_obj: StarletteRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db)
 ):
     # Log raw inputs to confirm parser
     print("=" * 50)
     print("DEBUG create_job called")
-    print("DEBUG content-type:", request_obj.headers.get("content-type"))
+    print("DEBUG content-type:", request.headers.get("content-type"))
     
     # Try to parse as multipart form data
     try:
-        form_data = await request_obj.form()
+        form_data = await request.form()
         print("DEBUG form_data keys:", list(form_data.keys()))
         print("DEBUG form_data type:", type(form_data))
         
@@ -480,7 +480,7 @@ async def create_job(
             print("WARNING: Image still not found, trying to parse multipart body manually")
             try:
                 # Reset the request body stream
-                body = await request_obj.body()
+                body = await request.body()
                 print(f"DEBUG body length: {len(body)}")
                 
                 # Try to use python-multipart to parse
@@ -488,7 +488,7 @@ async def create_job(
                 import io
                 
                 # Parse the multipart data
-                content_type = request_obj.headers.get("content-type", "")
+                content_type = request.headers.get("content-type", "")
                 boundary = content_type.split("boundary=")[-1] if "boundary=" in content_type else None
                 
                 if boundary:
@@ -598,16 +598,40 @@ async def create_job(
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Invalid description payload: {e}")
 
-    # Save image
+    # Save image to the correct asset location
+    # Path format: /assets/js/tenants/{tenant_id}/original/{year}/{month:02d}/{day:02d}/{filename}
     image_filename = image.filename if image.filename else 'upload.jpg'
-    filename = f"{uuid.uuid4().hex}{os.path.splitext(image_filename)[1]}"
-    path = os.path.join(MEDIA_ROOT, filename)
+    file_ext = os.path.splitext(image_filename)[1]
+    unique_filename = f"{uuid.uuid4().hex}{file_ext}"
+    
+    # Set kind to "original" for create_job()
+    kind = "original"
+    
+    # Get current date
+    now = datetime.utcnow()
+    year = now.year
+    month = f"{now.month:02d}"
+    day = f"{now.day:02d}"
+    
+    # Full directory path on the server's filesystem
+    # e.g., /opt/feedlyai/assets/js/tenants/{tenant_id}/original/2025/12/03
+    save_dir = os.path.join(ASSETS_ROOT, "js", "tenants", tenant_id, kind, str(year), month, day)
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # Final, full path to save the file on the server
+    save_path = os.path.join(save_dir, unique_filename)
+    
+    # Save the image file
     try:
         image_content = await image.read()
-        with open(path, "wb") as f:
+        with open(save_path, "wb") as f:
             f.write(image_content)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save image: {e}")
+    
+    # This is the web-accessible URL path to store in the database
+    # e.g., /assets/js/tenants/{tenant_id}/original/2025/12/03/some_uuid.jpg
+    path = f"/assets/js/tenants/{tenant_id}/{kind}/{year}/{month}/{day}/{unique_filename}"
 
     # Reference existing records from tone_styles, users, tenants tables
     # 1. Get or create user based on DEFAULT_USER_ID
@@ -933,99 +957,678 @@ async def gpt_ad_copy_kor(req: AdCopyKorRequest, db: AsyncSession = Depends(get_
     return {"job_id": str(job_id), "status": "done"}
 
 # --- CORRECTED /results endpoint ---
-@app.get("/api/v1/jobs/{job_id}/results", response_model=JobResult)
+@app.get("/api/v1/jobs/{job_id}/results", status_code=200)
 async def get_job_results(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    # 1. Fetch relative image paths from the database
-    image_query = (
+    """
+    job_id에 대한 최종 결과물(이미지 URL 목록, 광고 문구)을 반환합니다.
+    Job이 아직 처리 중인 경우 202 상태 코드를 반환하여 폴링을 계속하도록 합니다.
+    """
+    # 1. Check if job exists and has correct status
+    job_result = await db.execute(select(Job).where(Job.job_id == job_id))
+    job = job_result.scalar_one_or_none()
+    
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found.")
+    
+    # 2. Check if job is ready (current_step = 'instagram_feed_gen' and status = 'done')
+    if job.current_step != 'instagram_feed_gen' or job.status != 'done':
+        raise HTTPException(
+            status_code=202,  # Accepted - job is still processing
+            detail=f"Job is not ready yet. Current step: {job.current_step}, Status: {job.status}"
+        )
+    
+    # 3. Fetch 3 images from JobVariant (overlaid images)
+    image_stmt = (
         select(ImageAsset.image_url)
-        .join(JobVariant, JobVariant.overlaid_img_asset_id == ImageAsset.image_asset_id)
+        .join(JobVariant, ImageAsset.image_asset_id == JobVariant.overlaid_img_asset_id)
         .where(JobVariant.job_id == job_id)
+        .where(JobVariant.overlaid_img_asset_id.isnot(None))
         .order_by(JobVariant.creation_order)
         .limit(3)
     )
-    image_result = await db.execute(image_query)
-    # The database stores the correct URL path, e.g., "/assets/yh/tenants/..."
-    image_paths = [row[0] for row in image_result.fetchall()]
-    
-    # 2. Use the paths directly from the database.
-    # FIX: Do NOT prepend ASSETS_URL_PREFIX. The path from the DB is already correct.
-    images = [{"image_url": path} for path in image_paths]
-    
-    print(f"DEBUG: get_job_results for job_id={job_id}")
-    print(f"DEBUG: Found {len(images)} images. Returning URLs like: {images[0]['image_url'] if images else 'N/A'}")
+    image_result = await db.execute(image_stmt)
+    image_paths = image_result.scalars().all()
 
-    # 3. Fetch ad copy and hashtags from instagram_feeds table
-    feed_query = select(InstagramFeed.instagram_ad_copy, InstagramFeed.hashtags).where(InstagramFeed.job_id == job_id).limit(1)
-    feed_result = await db.execute(feed_query)
-    feed_data = feed_result.first()
-
-    if not images and not feed_data:
+    # 4. Check if we have exactly 3 images
+    if len(image_paths) < 3:
         raise HTTPException(
-            status_code=404, 
-            detail=f"No results found for job ID {job_id}."
+            status_code=202,  # Accepted - images are still being generated
+            detail=f"Images are still being generated. Found {len(image_paths)}/3 images."
+        )
+    
+    # 5. Fetch Instagram feed data
+    feed_stmt = select(InstagramFeed).where(InstagramFeed.job_id == job_id).order_by(InstagramFeed.created_at.desc())
+    feed_result = await db.execute(feed_stmt)
+    feed_data = feed_result.scalars().first()
+
+    if not feed_data:
+        raise HTTPException(
+            status_code=202,  # Accepted - feed is still being generated
+            detail="Instagram feed is still being generated."
         )
 
+    if not feed_data.instagram_ad_copy or not feed_data.hashtags:
+        raise HTTPException(
+            status_code=202,  # Accepted - feed content is incomplete
+            detail="Instagram feed content is incomplete."
+        )
+
+    # 6. Return final results
     return {
-        "images": images,
-        "instagram_ad_copy": feed_data.instagram_ad_copy if feed_data else "피드글을 생성하지 못했습니다.",
-        "hashtags": feed_data.hashtags if feed_data else "#오류"
+        "job_id": job_id,
+        "images": image_paths,
+        "instagram_ad_copy": feed_data.instagram_ad_copy,
+        "hashtags": feed_data.hashtags
     }
 
-# --- DEBUG endpoint to check job variants and images ---
-@app.get("/api/v1/jobs/{job_id}/debug")
-async def debug_job_results(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    """Debug endpoint to check job variants and image associations"""
-    # 1. Check all JobVariant records
-    variant_query = select(JobVariant).where(JobVariant.job_id == job_id).order_by(JobVariant.creation_order)
-    variant_result = await db.execute(variant_query)
-    variants = variant_result.scalars().all()
+# ============================
+# 🖼️ Image Upload Endpoint
+# ============================
+
+# --- FIX: Change the endpoint URL to match the expected API structure ---
+@app.post("/api/v1/jobs/create", status_code=200)
+async def create_job(
+    request: Request,
+    db: AsyncSession = Depends(get_db)
+):
+    # Log raw inputs to confirm parser
+    print("=" * 50)
+    print("DEBUG create_job called")
+    print("DEBUG content-type:", request.headers.get("content-type"))
     
-    variants_data = []
-    for v in variants:
-        variants_data.append({
-            "job_variants_id": str(v.job_variants_id),
-            "img_asset_id": str(v.img_asset_id) if v.img_asset_id else None,
-            "overlaid_img_asset_id": str(v.overlaid_img_asset_id) if v.overlaid_img_asset_id else None,
-            "creation_order": v.creation_order,
-            "status": v.status
-        })
+    # Try to parse as multipart form data
+    try:
+        form_data = await request.form()
+        print("DEBUG form_data keys:", list(form_data.keys()))
+        print("DEBUG form_data type:", type(form_data))
+        
+        # React Native FormData sends { uri, name, type } which gets stringified to "[object Object]"
+        # We need to iterate through all form entries to find the actual file
+        image = None
+        request_field = None
+        description_field = None
+        
+        # Iterate through all form entries
+        for key in form_data.keys():
+            value = form_data.get(key)
+            print(f"DEBUG form key '{key}': type={type(value)}, has_read={hasattr(value, 'read') if value else False}")
+            
+            if key == "image":
+                # Check if it's an UploadFile
+                if hasattr(value, 'read') and hasattr(value, 'filename'):
+                    image = value
+                    print(f"DEBUG Found UploadFile: filename={value.filename}")
+                else:
+                    print(f"WARNING: 'image' field is not an UploadFile: {type(value)}, value={str(value)[:100]}")
+            elif key == "image_base64":
+                # React Native에서 base64로 인코딩된 이미지
+                image_base64 = value
+                image_name = form_data.get("image_name", "upload.jpg")
+                print(f"DEBUG Found base64 image: name={image_name}, length={len(image_base64) if isinstance(image_base64, str) else 'N/A'}")
+            elif key == "image_name":
+                # 이미지 이름은 위에서 처리됨
+                pass
+            elif key == "request":
+                request_field = value
+            elif key == "description":
+                description_field = value
+        
+        # If image is still None, try to get it from form_data._list (internal structure)
+        if image is None:
+            print("WARNING: Image not found in form_data.keys(), trying _list")
+            if hasattr(form_data, '_list'):
+                print(f"DEBUG _list type: {type(form_data._list)}, length: {len(form_data._list) if hasattr(form_data._list, '__len__') else 'N/A'}")
+                for idx, item in enumerate(form_data._list):
+                    print(f"DEBUG _list[{idx}]: type={type(item)}, value={str(item)[:100] if not hasattr(item, 'read') else 'UploadFile'}")
+                    if isinstance(item, tuple) and len(item) >= 2:
+                        key, value = item[0], item[1]
+                        print(f"DEBUG _list item: key={key}, value_type={type(value)}")
+                        if key == "image" and hasattr(value, 'read'):
+                            image = value
+                            print(f"DEBUG Found UploadFile in _list: filename={value.filename}")
+                            break
+        
+        # Last resort: try to parse multipart body manually
+        if image is None:
+            print("WARNING: Image still not found, trying to parse multipart body manually")
+            try:
+                # Reset the request body stream
+                body = await request.body()
+                print(f"DEBUG body length: {len(body)}")
+                
+                # Try to use python-multipart to parse
+                from multipart import parse_form_data
+                import io
+                
+                # Parse the multipart data
+                content_type = request.headers.get("content-type", "")
+                boundary = content_type.split("boundary=")[-1] if "boundary=" in content_type else None
+                
+                if boundary:
+                    print(f"DEBUG boundary: {boundary}")
+                    # Create a file-like object from body
+                    body_stream = io.BytesIO(body)
+                    
+                    # Parse multipart form data
+                    fields, files = parse_form_data(body_stream, boundary.encode())
+                    print(f"DEBUG parsed fields: {list(fields.keys())}")
+                    print(f"DEBUG parsed files: {list(files.keys())}")
+                    
+                    if "image" in files:
+                        file_info = files["image"]
+                        print(f"DEBUG file_info: {file_info}")
+                        # file_info is a tuple (filename, file_object)
+                        if isinstance(file_info, tuple) and len(file_info) >= 2:
+                            filename, file_obj = file_info[0], file_info[1]
+                            # Read the file content
+                            file_content = file_obj.read()
+                            # Create a temporary UploadFile-like object
+                            from fastapi import UploadFile as FastAPIUploadFile
+                            from io import BytesIO
+                            
+                            image = FastAPIUploadFile(
+                                filename=filename or "upload.jpg",
+                                file=BytesIO(file_content)
+                            )
+                            print(f"DEBUG Created UploadFile from manual parsing: filename={filename}")
+            except Exception as e:
+                print(f"ERROR in manual multipart parsing: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        # If image is still None, check if we have base64 image
+        if image is None and 'image_base64' in locals() and image_base64:
+            print("DEBUG Processing base64 image")
+            try:
+                import base64
+                from io import BytesIO
+                from fastapi import UploadFile as FastAPIUploadFile
+                
+                # Decode base64 image
+                image_data = base64.b64decode(image_base64)
+                image = FastAPIUploadFile(
+                    filename=image_name if 'image_name' in locals() else "upload.jpg",
+                    file=BytesIO(image_data)
+                )
+                print(f"DEBUG Created UploadFile from base64: filename={image.filename}")
+            except Exception as e:
+                print(f"ERROR decoding base64 image: {e}")
+                import traceback
+                traceback.print_exc()
+                raise HTTPException(status_code=422, detail=f"Failed to decode base64 image: {str(e)}")
+        
+        if image is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Could not extract image file from FormData. React Native FormData may not be properly configured."
+            )
+        
+        print("DEBUG image filename:", image.filename if hasattr(image, 'filename') else 'N/A')
+        print("DEBUG image content_type:", image.content_type if hasattr(image, 'content_type') else 'N/A')
+        
+        # Get request or description field
+        request_field = form_data.get("request")
+        description_field = form_data.get("description")
+        
+        print("DEBUG request field:", request_field)
+        print("DEBUG description field:", description_field)
+        print("=" * 50)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"ERROR parsing form data: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=422, detail=f"Failed to parse form data: {str(e)}")
     
-    # 2. Check images from the query (same as results endpoint)
-    image_query = (
-        select(ImageAsset.image_asset_id, ImageAsset.image_url, JobVariant.creation_order)
-        .join(JobVariant, JobVariant.overlaid_img_asset_id == ImageAsset.image_asset_id)
+    # Prefer 'request' JSON, fallback to plain 'description'
+    raw = request_field or description_field
+    if not raw:
+        raise HTTPException(status_code=422, detail="Missing form field: 'request' or 'description'")
+
+    if not isinstance(raw, str):
+        raw = str(raw)
+
+    try:
+        data = json.loads(raw) if raw.strip().startswith("{") else {"description": raw}
+        description_text = (data.get("description") or raw).strip()
+        # Pull optional tenant/store from payload (no defaults)
+        tenant_id = data.get("tenant_id")
+        store_id_uuid = None
+        store_id_raw = data.get("store_id")
+        if store_id_raw:
+            try:
+                store_id_uuid = uuid.UUID(str(store_id_raw))
+            except Exception:
+                store_id_uuid = None
+        if not description_text:
+            raise ValueError("Description is empty")
+    except json.JSONDecodeError:
+        description_text = raw.strip()
+        tenant_id = None
+        store_id_uuid = None
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Invalid description payload: {e}")
+
+    # Save image to the correct asset location
+    # Path format: /assets/js/tenants/{tenant_id}/original/{year}/{month:02d}/{day:02d}/{filename}
+    image_filename = image.filename if image.filename else 'upload.jpg'
+    file_ext = os.path.splitext(image_filename)[1]
+    unique_filename = f"{uuid.uuid4().hex}{file_ext}"
+    
+    # Set kind to "original" for create_job()
+    kind = "original"
+    
+    # Get current date
+    now = datetime.utcnow()
+    year = now.year
+    month = f"{now.month:02d}"
+    day = f"{now.day:02d}"
+    
+    # Full directory path on the server's filesystem
+    # e.g., /opt/feedlyai/assets/js/tenants/{tenant_id}/original/2025/12/03
+    save_dir = os.path.join(ASSETS_ROOT, "js", "tenants", tenant_id, kind, str(year), month, day)
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # Final, full path to save the file on the server
+    save_path = os.path.join(save_dir, unique_filename)
+    
+    # Save the image file
+    try:
+        image_content = await image.read()
+        with open(save_path, "wb") as f:
+            f.write(image_content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save image: {e}")
+    
+    # This is the web-accessible URL path to store in the database
+    # e.g., /assets/js/tenants/{tenant_id}/original/2025/12/03/some_uuid.jpg
+    path = f"/assets/js/tenants/{tenant_id}/{kind}/{year}/{month}/{day}/{unique_filename}"
+
+    # Reference existing records from tone_styles, users, tenants tables
+    # 1. Get or create user based on DEFAULT_USER_ID
+    user_obj = None
+    creator_id = None
+    if DEFAULT_USER_ID:
+        try:
+            user_uuid = uuid.UUID(str(DEFAULT_USER_ID))
+            user_result = await db.execute(select(User).filter(User.user_id == user_uuid))
+            user_obj = user_result.scalar_one_or_none()
+            if user_obj:
+                creator_id = user_obj.user_id
+                print(f"DEBUG: Found user: {creator_id}")
+            else:
+                # User doesn't exist, create a new one
+                print(f"INFO: User '{DEFAULT_USER_ID}' not found, creating new user")
+                user_obj = User(
+                    user_id=user_uuid,
+                    uid=f"user_{user_uuid}"
+                )
+                db.add(user_obj)
+                await db.flush()
+                creator_id = user_obj.user_id
+                print(f"DEBUG: Created new user: {creator_id}")
+        except Exception as e:
+            print(f"ERROR: Invalid DEFAULT_USER_ID '{DEFAULT_USER_ID}': {e}")
+            raise HTTPException(status_code=400, detail=f"Invalid DEFAULT_USER_ID: {str(e)}")
+    else:
+        raise HTTPException(status_code=400, detail="DEFAULT_USER_ID is required but not set in environment variables")
+    
+    # 2. Get or create tenant based on user (user-specific tenant)
+    tenant_obj = None
+    if tenant_id:
+        # If tenant_id is provided in request, use it
+        tenant_result = await db.execute(select(Tenant).filter(Tenant.tenant_id == tenant_id))
+        tenant_obj = tenant_result.scalar_one_or_none()
+        if not tenant_obj:
+            # Tenant doesn't exist, create a new one
+            print(f"INFO: Tenant '{tenant_id}' not found in database, creating new tenant")
+            tenant_obj = Tenant(
+                tenant_id=tenant_id,
+                display_name=f"Tenant {tenant_id}",
+                uid=f"tenant_{tenant_id}"
+            )
+            db.add(tenant_obj)
+            await db.flush()
+            print(f"DEBUG: Created new tenant: {tenant_id}")
+    else:
+        # No tenant_id provided, create user-specific tenant
+        user_tenant_id = f"user_{creator_id}"
+        tenant_result = await db.execute(select(Tenant).filter(Tenant.tenant_id == user_tenant_id))
+        tenant_obj = tenant_result.scalar_one_or_none()
+        if tenant_obj:
+            tenant_id = user_tenant_id
+            print(f"DEBUG: Using existing user tenant: {tenant_id}")
+        else:
+            # Create user-specific tenant
+            print(f"INFO: Creating user-specific tenant: {user_tenant_id}")
+            tenant_obj = Tenant(
+                tenant_id=user_tenant_id,
+                display_name=f"User Tenant {creator_id}",
+                uid=f"tenant_{user_tenant_id}"
+            )
+            db.add(tenant_obj)
+            await db.flush()
+            tenant_id = user_tenant_id
+            print(f"DEBUG: Created user-specific tenant: {tenant_id}")
+    
+    # 3. Get or create store for the user
+    store_obj = None
+    # Check if store_id was provided in request
+    if store_id_uuid:
+        # If store_id is provided in request, verify it exists
+        store_result = await db.execute(select(Store).filter(Store.store_id == store_id_uuid))
+        store_obj = store_result.scalar_one_or_none()
+        if not store_obj:
+            print(f"WARNING: Store '{store_id_uuid}' not found in database, will create new one")
+            store_id_uuid = None
+    
+    if not store_id_uuid:
+        # No store_id provided or not found, find or create user-specific store
+        store_result = await db.execute(select(Store).filter(Store.user_id == creator_id).limit(1))
+        store_obj = store_result.scalar_one_or_none()
+        if store_obj:
+            store_id_uuid = store_obj.store_id
+            print(f"DEBUG: Using existing user store: {store_id_uuid}")
+        else:
+            # Create user-specific store
+            print(f"INFO: Creating user-specific store for user: {creator_id}")
+            store_obj = Store(
+                user_id=creator_id,
+                title=f"Store for User {creator_id}",
+                body=f"Default store for user {creator_id}",
+                store_category="default"
+            )
+            db.add(store_obj)
+            await db.flush()
+            store_id_uuid = store_obj.store_id
+            print(f"DEBUG: Created user-specific store: {store_id_uuid}")
+    
+    # 4. Get default tone_style (optional, can be None)
+    tone_style_id = None
+    try:
+        # Try to get the first active tone_style (or any tone_style if no active flag)
+        tone_style_result = await db.execute(select(ToneStyle).limit(1))
+        tone_style_obj = tone_style_result.scalar_one_or_none()
+        if tone_style_obj:
+            tone_style_id = tone_style_obj.tone_style_id
+            print(f"DEBUG: Using tone_style_id: {tone_style_id}")
+        else:
+            print("WARNING: No tone_style found in database, using None")
+    except Exception as e:
+        print(f"WARNING: Error fetching tone_style: {e}, using None")
+
+    # DB writes (ensure column names match schema)
+    new_job = Job(
+        # The job is first created with this state
+        status='done',
+        current_step='job_created',
+        tenant_id=tenant_id,
+        store_id=store_id_uuid  # Use the store_id we found or created
+    )
+    db.add(new_job)
+    await db.flush() # Flush to get the new_job.job_id
+
+    new_image = ImageAsset(
+        image_url=path,
+        tenant_id=tenant_id,
+        creator_id=creator_id,
+        job_id=new_job.job_id  # FIX: Assign the job_id to the image asset
+    )
+
+    db.add(new_image)
+    await db.flush() # Flush to get the new_image.image_asset_id
+
+    new_input = JobInput(
+        job_id=new_job.job_id,
+        img_asset_id=new_image.image_asset_id,
+        tone_style_id=tone_style_id,
+        desc_kor=description_text  # use parsed description
+    )
+    db.add(new_input)
+
+    # Immediately update the job to its next state before committing.
+    # This is the final signal to the listener.
+    new_job.current_step = 'user_img_input'
+    new_job.status = 'done' 
+    new_job.updated_at = datetime.utcnow()
+    
+    await db.commit()
+    return {"job_id": str(new_job.job_id), "status": "job_created_and_inputs_submitted"}
+
+@app.post("/api/js/gpt/kor-to-eng")
+async def gpt_kor_to_eng(req: KorToEngRequest, db: AsyncSession = Depends(get_db)):
+    """(FIXED) Translates Korean description and updates job_inputs.desc_eng."""
+    try:
+        job_id = uuid.UUID(req.job_id)
+        model_name = "gpt-4o-mini"
+        llm_model = await get_or_create_llm_model(db, model_name)
+        
+        job_input_res = await db.execute(select(JobInput).filter(JobInput.job_id == job_id))
+        job_input = job_input_res.scalar_one_or_none()
+        if not job_input or not job_input.desc_kor:
+            raise HTTPException(status_code=404, detail="Job input with Korean description not found.")
+        
+        # This step still expects JSON, so expect_json=True
+        gpt_result, metadata = await call_gpt(TRANSLATION_SYSTEM_PROMPT, job_input.desc_kor, model_name=model_name, expect_json=True)
+        desc_eng = gpt_result.get("translation_en", "Translation failed.")
+        
+        llm_trace = LLMTrace(
+            job_id = job_id,
+            provider = 'openai', # Corrected provider name
+            llm_model_id = llm_model.llm_model_id, # FIX: Use the ID from the fetched model object
+            operation_type = 'kor_to_eng',
+            request = {"system": TRANSLATION_SYSTEM_PROMPT, "user": job_input.desc_kor},
+            response = {"content": desc_eng},
+            latency_ms = metadata.get('latency_ms', 0),
+            prompt_tokens = metadata.get('token_usage', {}).get('prompt_tokens'),
+            completion_tokens = metadata.get('token_usage', {}).get('completion_tokens'),
+            total_tokens = metadata.get('token_usage', {}).get('total_tokens'),
+            token_usage = metadata.get('token_usage', {})
+        )
+        db.add(llm_trace)
+        
+        # 4. UPDATE the desc_eng field in the job_inputs table
+        job_input.desc_eng = desc_eng
+        job_input.updated_at = datetime.utcnow()
+        
+        # 5. Update job status to signal completion of this step
+        job = await db.get(Job, job_id)
+        if job:
+            job.current_step = 'kor_to_eng'
+            job.status = 'done'
+            job.updated_at = datetime.utcnow()
+        
+        await db.commit()
+        
+        return {"job_id": str(job_id), "status": "done", "desc_eng": desc_eng}
+    except Exception as e:
+        print(f"ERROR in kor-to-eng: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@app.post("/api/js/gpt/ad-copy-eng")
+async def gpt_ad_copy_eng(req: AdCopyEngRequest, db: AsyncSession = Depends(get_db)):
+    """(FIXED) Creates a single English ad copy and saves it to txt_ad_copy_generations."""
+    job_id = uuid.UUID(req.job_id)
+    model_name = "gpt-4o-mini"
+    llm_model = await get_or_create_llm_model(db, model_name)
+    
+    job_input_res = await db.execute(select(JobInput).filter(JobInput.job_id == job_id))
+    job_input = job_input_res.scalar_one_or_none()
+    if not job_input or not job_input.desc_eng:
+        raise HTTPException(status_code=404, detail="English description not found in job_inputs. Run kor-to-eng first.")
+    
+    # FIX: Call GPT expecting plain text (expect_json=False)
+    user_prompt = f"Description (English): {job_input.desc_eng}"
+    ad_copy_eng_text, metadata = await call_gpt(GPT_COPY_SYSTEM_PROMPT, user_prompt, model_name=model_name, expect_json=False)
+    
+    # Create LLM trace
+    llm_trace = LLMTrace(
+        job_id = job_id,
+        provider = 'openai', # Corrected provider name
+        llm_model_id = llm_model.llm_model_id, # FIX: Use the ID from the fetched model object
+        operation_type = 'ad_copy_gen',
+        request = metadata['request'],
+        response = {"content": metadata['response']},
+        latency_ms = metadata['latency_ms'],
+        prompt_tokens = metadata['token_usage'].get('prompt_tokens'),
+        completion_tokens = metadata['token_usage'].get('completion_tokens'),
+        total_tokens = metadata['token_usage'].get('total_tokens'),
+        token_usage = metadata['token_usage']
+    )
+    db.add(llm_trace)
+    await db.flush()
+    
+    # UPSERT logic for txt_ad_copy_generations
+    gen_res = await db.execute(select(TxtAdCopyGeneration).filter_by(job_id=job_id, generation_stage='ad_copy_eng'))
+    ad_copy_gen = gen_res.scalar_one_or_none()
+    
+    if ad_copy_gen:
+        ad_copy_gen.llm_trace_id = llm_trace.llm_trace_id
+        ad_copy_gen.ad_copy_eng = ad_copy_eng_text # FIX: Save plain text directly
+        ad_copy_gen.status = 'done'
+        ad_copy_gen.updated_at = datetime.utcnow()
+    else:
+        ad_copy_gen = TxtAdCopyGeneration(
+            job_id=job_id, llm_trace_id=llm_trace.llm_trace_id,
+            generation_stage='ad_copy_eng', ad_copy_eng=ad_copy_eng_text, status='done' # FIX: Save plain text directly
+        )
+        db.add(ad_copy_gen)
+        
+    # Update job status
+    job = await db.get(Job, job_id)
+    if job:
+        job.current_step = 'ad_copy_eng'
+        job.status = 'done'
+        job.updated_at = datetime.utcnow()
+        
+    await db.commit()
+    
+    return {"job_id": str(job_id), "status": "done"}
+
+@app.post("/api/js/gpt/ad-copy-kor")
+async def gpt_ad_copy_kor(req: AdCopyKorRequest, db: AsyncSession = Depends(get_db)):
+    """(FIXED) Creates a single Korean ad copy and saves it to txt_ad_copy_generations."""
+    job_id = uuid.UUID(req.job_id)
+    model_name = "gpt-4o-mini"
+    llm_model = await get_or_create_llm_model(db, model_name)
+    
+    eng_gen_res = await db.execute(select(TxtAdCopyGeneration).filter_by(job_id=job_id, generation_stage='ad_copy_eng'))
+    eng_gen = eng_gen_res.scalar_one_or_none()
+    if not eng_gen or not eng_gen.ad_copy_eng:
+        raise HTTPException(status_code=404, detail="English ad copy not found. Run ad-copy-eng first.")
+    
+    # FIX: Call GPT expecting plain text (expect_json=False)
+    ad_copy_kor_text, metadata = await call_gpt(ENG_TO_KOR_TRANSLATION_PROMPT, eng_gen.ad_copy_eng, model_name=model_name, expect_json=False)
+    
+    # Create LLM trace
+    llm_trace = LLMTrace(
+        job_id = job_id,
+        provider = 'openai', # Corrected provider name
+        llm_model_id = llm_model.llm_model_id, # FIX: Use the ID from the fetched model object
+        operation_type = 'ad_copy_kor',
+        request = metadata['request'],
+        response = {"content": metadata['response']},
+        latency_ms = metadata['latency_ms'],
+        prompt_tokens = metadata['token_usage'].get('prompt_tokens'),
+        completion_tokens = metadata['token_usage'].get('completion_tokens'),
+        total_tokens = metadata['token_usage'].get('total_tokens'),
+        token_usage = metadata['token_usage']
+    )
+    db.add(llm_trace)
+    await db.flush()
+    
+    # UPSERT logic for txt_ad_copy_generations
+    gen_res = await db.execute(select(TxtAdCopyGeneration).filter_by(job_id=job_id, generation_stage='ad_copy_kor'))
+    ko_record = gen_res.scalar_one_or_none()
+
+    if ko_record:
+        ko_record.llm_trace_id = llm_trace.llm_trace_id
+        ko_record.ad_copy_kor = ad_copy_kor_text # FIX: Save plain text directly
+        ko_record.status = 'done'
+        ko_record.updated_at = datetime.utcnow()
+    else:
+        ko_record = TxtAdCopyGeneration(
+            job_id=job_id, llm_trace_id=llm_trace.llm_trace_id,
+            generation_stage='ad_copy_kor', ad_copy_kor=ad_copy_kor_text, status='done' # FIX: Save plain text directly
+        )
+        db.add(ko_record)
+        
+    # Update job status (final step)
+    job = await db.get(Job, job_id)
+    if job:
+        # FIX: Set current_step to 'user_img_input' as requested at the end of the pipeline.
+        job.current_step = 'user_img_input' 
+        job.status = 'done'
+        job.updated_at = datetime.utcnow()
+        
+    await db.commit()
+    
+    return {"job_id": str(job_id), "status": "done"}
+
+# --- CORRECTED /results endpoint ---
+@app.get("/api/v1/jobs/{job_id}/results", status_code=200)
+async def get_job_results(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """
+    job_id에 대한 최종 결과물(이미지 URL 목록, 광고 문구)을 반환합니다.
+    Job이 아직 처리 중인 경우 202 상태 코드를 반환하여 폴링을 계속하도록 합니다.
+    """
+    # 1. Check if job exists and has correct status
+    job_result = await db.execute(select(Job).where(Job.job_id == job_id))
+    job = job_result.scalar_one_or_none()
+    
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found.")
+    
+    # 2. Check if job is ready (current_step = 'instagram_feed_gen' and status = 'done')
+    if job.current_step != 'instagram_feed_gen' or job.status != 'done':
+        raise HTTPException(
+            status_code=202,  # Accepted - job is still processing
+            detail=f"Job is not ready yet. Current step: {job.current_step}, Status: {job.status}"
+        )
+    
+    # 3. Fetch 3 images from JobVariant (overlaid images)
+    image_stmt = (
+        select(ImageAsset.image_url)
+        .join(JobVariant, ImageAsset.image_asset_id == JobVariant.overlaid_img_asset_id)
         .where(JobVariant.job_id == job_id)
+        .where(JobVariant.overlaid_img_asset_id.isnot(None))
         .order_by(JobVariant.creation_order)
         .limit(3)
     )
-    image_result = await db.execute(image_query)
-    image_rows = image_result.fetchall()
+    image_result = await db.execute(image_stmt)
+    image_paths = image_result.scalars().all()
+
+    # 4. Check if we have exactly 3 images
+    if len(image_paths) < 3:
+        raise HTTPException(
+            status_code=202,  # Accepted - images are still being generated
+            detail=f"Images are still being generated. Found {len(image_paths)}/3 images."
+        )
     
-    images_data = []
-    for img_id, img_url, order in image_rows:
-        images_data.append({
-            "image_asset_id": str(img_id),
-            "image_url": img_url,
-            "creation_order": order
-        })
-    
-    # 3. Check Instagram feed data
-    feed_query = select(InstagramFeed).where(InstagramFeed.job_id == job_id).limit(1)
-    feed_result = await db.execute(feed_query)
-    feed_data = feed_result.scalar_one_or_none()
-    
-    feed_info = None
-    if feed_data:
-        feed_info = {
-            "instagram_ad_copy": feed_data.instagram_ad_copy,
-            "hashtags": feed_data.hashtags
-        }
-    
+    # 5. Fetch Instagram feed data
+    feed_stmt = select(InstagramFeed).where(InstagramFeed.job_id == job_id).order_by(InstagramFeed.created_at.desc())
+    feed_result = await db.execute(feed_stmt)
+    feed_data = feed_result.scalars().first()
+
+    if not feed_data:
+        raise HTTPException(
+            status_code=202,  # Accepted - feed is still being generated
+            detail="Instagram feed is still being generated."
+        )
+
+    if not feed_data.instagram_ad_copy or not feed_data.hashtags:
+        raise HTTPException(
+            status_code=202,  # Accepted - feed content is incomplete
+            detail="Instagram feed content is incomplete."
+        )
+
+    # 6. Return final results
     return {
-        "job_id": str(job_id),
-        "variants_count": len(variants),
-        "variants": variants_data,
-        "images_from_query_count": len(images_data),
-        "images_from_query": images_data,
-        "feed_data": feed_info
-    }
+        "job_id": job_id,
+        "images": image_paths,
+        "instagram_ad_copy
+        }
