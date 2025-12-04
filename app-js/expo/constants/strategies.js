@@ -22,9 +22,9 @@ export const STRATEGIES = [
   },
   { 
     id: 4, 
-    name: "retro", 
-    label: "Retro / Vintage", 
-    hint: "가게 전경, 오래된 간판, 분위기 있는 사진 추천.",
-    placeholder: "예: '30년 전통의 노포 분위기를 살려주세요.'"
+    name: "Minimal", 
+    label: "Minimalist Branding", 
+    hint: "음식 사진을 작게 넣을수록 깔끔하게 나와요.",
+    placeholder: "예: '브랜드 로고나 가게 이름이 좋아요'"
   },
 ];

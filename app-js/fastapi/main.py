@@ -60,7 +60,7 @@ TRANSLATION_SYSTEM_PROMPT = "You are a professional marketing copy translator. Y
 # --- FIX: Simplified to generate ONE plain text English ad copy ---
 GPT_COPY_SYSTEM_PROMPT = """
 You are Feedly AI, an AI assistant that generates Instagram ad copy. You will be given an English description.
-Your task is to generate ONE compelling English ad copy option based on one of the following strategies: Hero Dish Focus, Seasonal, Behind-the-Scenes, or Lifestyle.
+Your task is to generate ONE compelling English ad copy option based on one of the following strategies: Hero Dish Focus, Seasonal/Limited Time, Emotion/Comfort, or Minimalist Branding.
 - Output ONLY the single ad copy text.
 - Do NOT include strategy names, hashtags, emojis, or any other text.
 - Do NOT use JSON.
@@ -71,6 +71,7 @@ ENG_TO_KOR_TRANSLATION_PROMPT = """
 You are a professional marketing copy translator specializing in Instagram food ads.
 Translate the given English ad copy into a single, natural, and appealing Korean sentence.
 - Output ONLY the translated Korean text.
+- 한글로 형용사, 명사만 사용해서 부사, 조사 빼고 10글자 이내로 만들어주세요.
 - Do NOT include hashtags, emojis, or any other text.
 - Do NOT use JSON.
 """
