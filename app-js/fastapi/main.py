@@ -150,7 +150,7 @@ class ImageAsset(Base):
     pk = Column(Integer, server_default=text("nextval('image_assets_pk_seq'::regclass)"), nullable=False)  # SERIAL with server default
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-
+    job_id = Column(UUID(as_uuid=True), ForeignKey('jobs.job_id'), nullable=False, primary_key=True)
 
 class JobInput(Base):
     __tablename__ = 'job_inputs'
@@ -723,11 +723,6 @@ async def create_job(
         print(f"WARNING: Error fetching tone_style: {e}, using None")
 
     # DB writes (ensure column names match schema)
-    new_image = ImageAsset(
-        image_url=path,
-        tenant_id=tenant_id,
-        creator_id=creator_id
-    )
     new_job = Job(
         # The job is first created with this state
         status='done',
@@ -735,9 +730,18 @@ async def create_job(
         tenant_id=tenant_id,
         store_id=store_id_uuid  # Use the store_id we found or created
     )
+    db.add(new_job)
+    await db.flush() # Flush to get the new_job.job_id
 
-    db.add_all([new_image, new_job])
-    await db.flush() # Flush to get IDs for the next objects
+    new_image = ImageAsset(
+        image_url=path,
+        tenant_id=tenant_id,
+        creator_id=creator_id,
+        job_id=new_job.job_id  # FIX: Assign the job_id to the image asset
+    )
+
+    db.add(new_image)
+    await db.flush() # Flush to get the new_image.image_asset_id
 
     new_input = JobInput(
         job_id=new_job.job_id,
